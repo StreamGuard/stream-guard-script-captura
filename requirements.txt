@@ -1,2 +1,4 @@
 requests
 psutil
+rich
+python-dotenv
