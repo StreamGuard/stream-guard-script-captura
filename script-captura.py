@@ -4,6 +4,8 @@ import requests
 import os
 import psutil
 import time
+from datetime import datetime
+import csv
 
 from rich.console import Console
 from rich.text import Text
@@ -28,7 +30,6 @@ def montar_metricas():
     return {
         "CPU": [
             {"tipo": "USO_CPU", "nome": "Uso da CPU", "unidade": "%"},
-            {"tipo": "USO_CPU_NUCLEO", "nome": "Uso da CPU por núcleo", "unidade": "%"},
             {"tipo": "CARGA_CPU_1M", "nome": "Carga da CPU - 1 minuto", "unidade": "load"},
             {"tipo": "CARGA_CPU_5M", "nome": "Carga da CPU - 5 minutos", "unidade": "load"},
             {"tipo": "CARGA_CPU_15M", "nome": "Carga da CPU - 15 minutos", "unidade": "load"}
@@ -200,5 +201,69 @@ def realizar_login():
 
     return empresa_id
 
+def capturar_metricas():
+    uso_cpu = psutil.cpu_percent(interval=1)
+
+    if hasattr(psutil, "getloadavg"):
+        carga_1m, carga_5m, carga_15m = psutil.getloadavg()
+    else:
+        carga_1m = carga_5m = carga_15m = 0.0
+
+    memoria = psutil.virtual_memory()
+    uso_ram = memoria.percent
+    ram_disponivel = memoria.available
+
+    disco = psutil.disk_usage('/')
+    uso_disco = disco.percent
+
+    io_disco = psutil.disk_io_counters()
+    taxa_leitura = io_disco.read_bytes if io_disco else 0
+    taxa_escrita = io_disco.write_bytes if io_disco else 0
+
+    return {
+        "servidor_id": server_id,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uso_cpu": uso_cpu,
+        "carga_1m": carga_1m,
+        "carga_5m": carga_5m,
+        "carga_15m": carga_15m,
+        "uso_ram": uso_ram,
+        "ram_disponivel": ram_disponivel,
+        "uso_disco": uso_disco,
+        "taxa_leitura_disco": taxa_leitura,
+        "taxa_escrita_disco": taxa_escrita
+    }
+
+def iniciar_monitoramento(intervalo_segundos=5):
+    diretorio = "csvs"
+    os.makedirs(diretorio, exist_ok=True)
+    caminho_arquivo = os.path.join(diretorio, f"monitoramento_{server_id}.csv")
+
+    headers = [
+        "servidor_id", "timestamp", "uso_cpu", "carga_1m",
+        "carga_5m", "carga_15m", "uso_ram", "ram_disponivel",
+        "uso_disco", "taxa_leitura_disco", "taxa_escrita_disco"
+    ]
+
+    if not os.path.exists(caminho_arquivo):
+        with open(caminho_arquivo, mode='w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+
+    print(f"Monitoramento ativo. Gravando dados em '{caminho_arquivo}'...")
+    try:
+        while True:
+            dados = capturar_metricas()
+
+            with open(caminho_arquivo, mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writerow(dados)
+
+            time.sleep(intervalo_segundos)
+
+    except KeyboardInterrupt:
+        print("\nMonitoramento encerrado pelo usuário.")
+
 if __name__ == "__main__":
-    realizar_login()
+    if realizar_login():
+        iniciar_monitoramento()
