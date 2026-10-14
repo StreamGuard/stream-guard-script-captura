@@ -23,7 +23,8 @@ def montar_componentes():
     return [
         {"tipo": "CPU", "nome": "CPU"},
         {"tipo": "RAM", "nome": "RAM"},
-        {"tipo": "DISCO", "nome": "Disco raiz"}
+        {"tipo": "DISCO", "nome": "Disco raiz"},
+        {"tipo": "REDE", "nome": "Rede da máquina"}
     ]
 
 def montar_metricas():
@@ -42,6 +43,10 @@ def montar_metricas():
             {"tipo": "TAXA_LEITURA_DISCO", "nome": "Taxa de leitura do disco", "unidade": "bytes/s"},
             {"tipo": "TAXA_ESCRITA_DISCO", "nome": "Taxa de escrita do disco", "unidade": "bytes/s"},
             {"tipo": "USO_DISCO", "nome": "Uso do disco", "unidade": "%"}
+        ],
+        "REDE": [
+            {"tipo": "TAXA_ENVIO_REDE", "nome": "Taxa de envio da rede", "unidade": "bytes/s"},
+            {"tipo": "TAXA_RECEBIMENTO_REDE", "nome": "Taxa de recebimento da rede", "unidade": "bytes/s"}
         ]
     }
 
@@ -85,7 +90,10 @@ def cadastrar_componentes():
                 dados_comp["tipo"] = componente["tipo"]
             componentes_cadastrados.append(dados_comp)
         else:
-            console.print(f"[red]Erro ao cadastrar componente {componente['nome']}[/red]")
+         console.print(
+        f"[red]Erro ao cadastrar componente {componente['nome']} "
+        f"(HTTP {response.status_code}): {response.text}[/red]"
+    )
 
     return componentes_cadastrados
 
@@ -201,8 +209,27 @@ def realizar_login():
 
     return empresa_id
 
+def calcular_taxa(contador_inicial, contador_final, campo, segundos):
+    if contador_inicial is None or contador_final is None:
+        return None
+
+    diferenca = getattr(contador_final, campo) - getattr(contador_inicial, campo)
+    if diferenca < 0:
+        return None
+
+    return diferenca / segundos
+
+
 def capturar_metricas():
+    disco_inicial = psutil.disk_io_counters()
+    rede_inicial = psutil.net_io_counters()
+    inicio = time.monotonic()
+
     uso_cpu = psutil.cpu_percent(interval=1)
+
+    disco_final = psutil.disk_io_counters()
+    rede_final = psutil.net_io_counters()
+    segundos = time.monotonic() - inicio
 
     if hasattr(psutil, "getloadavg"):
         carga_1m, carga_5m, carga_15m = psutil.getloadavg()
@@ -213,12 +240,14 @@ def capturar_metricas():
     uso_ram = memoria.percent
     ram_disponivel = memoria.available
 
-    disco = psutil.disk_usage('/')
+    raiz_disco = os.path.abspath(os.sep)
+    disco = psutil.disk_usage(raiz_disco)
     uso_disco = disco.percent
 
-    io_disco = psutil.disk_io_counters()
-    taxa_leitura = io_disco.read_bytes if io_disco else 0
-    taxa_escrita = io_disco.write_bytes if io_disco else 0
+    taxa_leitura = calcular_taxa(disco_inicial, disco_final, "read_bytes", segundos)
+    taxa_escrita = calcular_taxa(disco_inicial, disco_final, "write_bytes", segundos)
+    taxa_envio = calcular_taxa(rede_inicial, rede_final, "bytes_sent", segundos)
+    taxa_recebimento = calcular_taxa(rede_inicial, rede_final, "bytes_recv", segundos)
 
     return {
         "servidor_id": server_id,
@@ -231,19 +260,28 @@ def capturar_metricas():
         "ram_disponivel": ram_disponivel,
         "uso_disco": uso_disco,
         "taxa_leitura_disco": taxa_leitura,
-        "taxa_escrita_disco": taxa_escrita
+        "taxa_escrita_disco": taxa_escrita,
+        "taxa_envio_rede": taxa_envio,
+        "taxa_recebimento_rede": taxa_recebimento
     }
 
 def iniciar_monitoramento(intervalo_segundos=5):
     diretorio = "csvs"
     os.makedirs(diretorio, exist_ok=True)
-    caminho_arquivo = os.path.join(diretorio, f"monitoramento_{server_id}.csv")
+    caminho_arquivo = os.path.join(diretorio, f"monitoramento_v2_{server_id}.csv")
 
     headers = [
         "servidor_id", "timestamp", "uso_cpu", "carga_1m",
         "carga_5m", "carga_15m", "uso_ram", "ram_disponivel",
-        "uso_disco", "taxa_leitura_disco", "taxa_escrita_disco"
+        "uso_disco", "taxa_leitura_disco", "taxa_escrita_disco",
+        "taxa_envio_rede", "taxa_recebimento_rede"
     ]
+
+    if os.path.exists(caminho_arquivo):
+        with open(caminho_arquivo, newline='', encoding='utf-8') as arquivo:
+            cabecalho_existente = next(csv.reader(arquivo), None)
+        if cabecalho_existente != headers:
+            raise ValueError(f"Cabeçalho incompatível no arquivo {caminho_arquivo}")
 
     if not os.path.exists(caminho_arquivo):
         with open(caminho_arquivo, mode='w', newline='', encoding='utf-8') as f:
