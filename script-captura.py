@@ -220,6 +220,50 @@ def calcular_taxa(contador_inicial, contador_final, campo, segundos):
     return diferenca / segundos
 
 
+def preparar_processos():
+    processos = []
+    for processo in psutil.process_iter():
+        try:
+            processo.cpu_percent(interval=None)
+            processos.append(processo)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return processos
+
+
+def capturar_processos(processos, timestamp):
+    registros = []
+    for processo in processos:
+        try:
+            with processo.oneshot():
+                registros.append({
+                    "servidor_id": server_id,
+                    "timestamp": timestamp,
+                    "pid": processo.pid,
+                    "nome": processo.name(),
+                    "status": processo.status(),
+                    "uso_cpu": processo.cpu_percent(interval=None),
+                    "ram_bytes": processo.memory_info().rss
+                })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return registros
+
+
+def gravar_processos(caminho, registros):
+    headers = ["servidor_id", "timestamp", "pid", "nome", "status", "uso_cpu", "ram_bytes"]
+    if os.path.exists(caminho):
+        with open(caminho, newline='', encoding='utf-8') as arquivo:
+            if next(csv.reader(arquivo), None) != headers:
+                raise ValueError(f"Cabeçalho incompatível no arquivo {caminho}")
+    escrever_cabecalho = not os.path.exists(caminho)
+    with open(caminho, mode='a', newline='', encoding='utf-8') as arquivo:
+        writer = csv.DictWriter(arquivo, fieldnames=headers)
+        if escrever_cabecalho:
+            writer.writeheader()
+        writer.writerows(registros)
+
+
 def capturar_metricas():
     disco_inicial = psutil.disk_io_counters()
     rede_inicial = psutil.net_io_counters()
@@ -265,10 +309,16 @@ def capturar_metricas():
         "taxa_recebimento_rede": taxa_recebimento
     }
 
-def iniciar_monitoramento(intervalo_segundos=5):
+def iniciar_monitoramento(intervalo_segundos=5, intervalo_processos=40):
     diretorio = "csvs"
     os.makedirs(diretorio, exist_ok=True)
-    caminho_arquivo = os.path.join(diretorio, f"monitoramento_v2_{server_id}.csv")
+
+    caminho_arquivo = os.path.join(
+        diretorio, f"monitoramento_v2_{server_id}.csv"
+    )
+    caminho_processos = os.path.join(
+        diretorio, f"processos_{server_id}.csv"
+    )
 
     headers = [
         "servidor_id", "timestamp", "uso_cpu", "carga_1m",
@@ -278,23 +328,45 @@ def iniciar_monitoramento(intervalo_segundos=5):
     ]
 
     if os.path.exists(caminho_arquivo):
-        with open(caminho_arquivo, newline='', encoding='utf-8') as arquivo:
+        with open(caminho_arquivo, newline="", encoding="utf-8") as arquivo:
             cabecalho_existente = next(csv.reader(arquivo), None)
-        if cabecalho_existente != headers:
-            raise ValueError(f"Cabeçalho incompatível no arquivo {caminho_arquivo}")
 
-    if not os.path.exists(caminho_arquivo):
-        with open(caminho_arquivo, mode='w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
+        if cabecalho_existente != headers:
+            raise ValueError(
+                f"Cabeçalho incompatível no arquivo {caminho_arquivo}"
+            )
+    else:
+        with open(
+            caminho_arquivo, mode="w", newline="", encoding="utf-8"
+        ) as arquivo:
+            writer = csv.DictWriter(arquivo, fieldnames=headers)
             writer.writeheader()
 
+    proxima_coleta_processos = time.monotonic()
+
     print(f"Monitoramento ativo. Gravando dados em '{caminho_arquivo}'...")
+
     try:
         while True:
+            agora = time.monotonic()
+            coletar_processos = agora >= proxima_coleta_processos
+
+            if coletar_processos:
+                processos = preparar_processos()
+
             dados = capturar_metricas()
 
-            with open(caminho_arquivo, mode='a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=headers)
+            if coletar_processos:
+                registros_processos = capturar_processos(
+                    processos, dados["timestamp"]
+                )
+                gravar_processos(caminho_processos, registros_processos)
+                proxima_coleta_processos = agora + intervalo_processos
+
+            with open(
+                caminho_arquivo, mode="a", newline="", encoding="utf-8"
+            ) as arquivo:
+                writer = csv.DictWriter(arquivo, fieldnames=headers)
                 writer.writerow(dados)
 
             time.sleep(intervalo_segundos)
