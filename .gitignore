@@ -1,2 +1,18 @@
 .venv/
 .env
+
+# Cache e travas de execução
+__pycache__/
+*.pyc
+automacao.lock
+.processamento.lock
+
+# Lotes e resultados gerados
+csvs/lotes/
+dados-analise/
+resultados-analise/
+validacao-gold/
+validacao-silver/
+
+# Cópias locais das configurações
+.env.antes-bootstrap
