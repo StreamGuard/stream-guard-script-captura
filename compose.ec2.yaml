@@ -1,0 +1,42 @@
+services:
+  banco:
+    image: mysql:8.0
+    restart: unless-stopped
+    env_file:
+      - banco.env
+    # Reduz o consumo na instância de estudante.
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --max-connections=30
+      - --performance-schema=OFF
+    volumes:
+      - dados_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", 'MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -h 127.0.0.1 -u root -e "SELECT 1"']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  api:
+    build:
+      context: ./stream-guard-site-institucional
+    restart: unless-stopped
+    env_file:
+      - api.env
+    ports:
+      - "3333:3333"
+    depends_on:
+      banco:
+        condition: service_healthy
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  dados_mysql:

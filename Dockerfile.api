@@ -1,0 +1,12 @@
+FROM node:22-alpine
+WORKDIR /app
+
+# Instala as dependências antes de copiar o restante do código.
+COPY package*.json ./
+RUN npm install --omit=dev
+
+# Executa a aplicação com um usuário sem privilégios de administrador.
+COPY . .
+USER node
+EXPOSE 3333
+CMD ["node", "app.js"]
