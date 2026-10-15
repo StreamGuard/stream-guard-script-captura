@@ -24,6 +24,41 @@ if [[ "$INFRA" =~ [[:space:]] ]]; then
     exit 1
 fi
 
+# Valida o .env antes de alterar serviços ou instalar pacotes.
+# Este instalador usa a função IAM da EC2. O perfil local fica na máquina monitorada.
+python3 - "$RAIZ/.env" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+caminho = Path(sys.argv[1])
+if not caminho.is_file():
+    raise SystemExit('Crie o .env com S3_BUCKET e AWS_DEFAULT_REGION antes de instalar.')
+
+# Lê os campos do modelo sem executar seu conteúdo como comandos shell.
+config = {}
+for linha in caminho.read_text(encoding='utf-8-sig').splitlines():
+    linha = linha.strip()
+    if not linha or linha.startswith('#') or '=' not in linha:
+        continue
+    chave, valor = linha.split('=', 1)
+    valor = valor.strip()
+    if len(valor) >= 2 and valor[0] == valor[-1] and valor[0] in ('"', "'"):
+        valor = valor[1:-1]
+    else:
+        valor = re.split(r'\s+#', valor, maxsplit=1)[0].rstrip()
+    config[chave.strip()] = valor
+
+bucket = config.get('S3_BUCKET', '')
+if not bucket or bucket == 'NOME_DO_SEU_BUCKET' or not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', bucket):
+    raise SystemExit('Preencha S3_BUCKET no .env com o nome real do seu bucket, sem s3:// nem subpastas.')
+if not config.get('AWS_DEFAULT_REGION') or config['AWS_DEFAULT_REGION'] == 'SUA_REGIAO':
+    raise SystemExit('Preencha AWS_DEFAULT_REGION no .env com a região do seu bucket.')
+if 'AWS_PROFILE' in config:
+    raise SystemExit('Na EC2, comente a linha AWS_PROFILE no .env para usar a função IAM. O perfil local fica apenas no computador monitorado.')
+print('Configuração da EC2 validada. Nenhum bucket será escolhido automaticamente.', flush=True)
+PY
+
 sudo -n true
 # Instala somente dependências ausentes em uma EC2 Ubuntu com systemd.
 pacotes=()
@@ -57,15 +92,14 @@ criar_se_ausente(infra / 'api.env',
     'AMBIENTE_PROCESSO=producao\nAPP_PORT=3333\nAPP_HOST=0.0.0.0\n'
     'DB_HOST=banco\nDB_PORT=3306\nDB_DATABASE=streamguard\n'
     f'DB_USER=streamguard_api\nDB_PASSWORD={secrets.token_hex(24)}\n')
-criar_se_ausente(raiz / '.env',
-    '# Configure o bucket do seu grupo. A EC2 utiliza a função IAM.\n'
-    'S3_BUCKET=streamguard-grupo-10-04261\nAWS_DEFAULT_REGION=us-east-1\n'
-    'GOLD_JANELA_MINUTOS=5\n')
+
 PY
 
 # Usa o volume existente. Não executa DROP DATABASE nem remove volumes.
 if [[ -f "$INFRA/compose.yaml" ]]; then
-    cp -n "$INFRA/compose.yaml" "$INFRA/compose.antes-instalador.yaml" || true
+    if [[ ! -e "$INFRA/compose.antes-instalador.yaml" ]]; then
+        cp "$INFRA/compose.yaml" "$INFRA/compose.antes-instalador.yaml"
+    fi
 fi
 cp "$RAIZ/compose.ec2.yaml" "$INFRA/compose.yaml"
 cp "$RAIZ/Dockerfile.api" "$SITE/Dockerfile"
