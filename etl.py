@@ -1,3 +1,4 @@
+import re
 import csv
 import io
 import json
@@ -184,6 +185,49 @@ def exportar_csv(conexao, categoria, caminho, headers):
     return total
 
 
+def listar_arquivos_prontos(s3, bucket):
+    # Primeiro identifica todos os lotes concluídos; a paginação pode ter várias respostas.
+    paginas = s3.get_paginator("list_objects_v2")
+    concluidos = {}
+    for pagina in paginas.paginate(Bucket=bucket, Prefix="bronze/lotes-concluidos/"):
+        for objeto in pagina.get("Contents", []):
+            chave = objeto["Key"]
+            if not chave.endswith(".json"):
+                continue
+            resposta = s3.get_object(Bucket=bucket, Key=chave)
+            with closing(resposta["Body"]) as corpo:
+                marcador = json.loads(corpo.read())
+            lote = marcador["lote"]
+            if chave != f"bronze/lotes-concluidos/{lote}.json":
+                raise ValueError(f"Nome de marcador incompatível: {chave}")
+            objetos = marcador["objetos"]
+            if not objetos:
+                raise ValueError(f"Marcador sem arquivos: {chave}")
+            for item in objetos:
+                arquivo = item["chave"]
+                padrao = r"bronze/(monitoramento_v2_\d+|processos_\d+)/" + re.escape(lote) + r"\.csv"
+                if not re.fullmatch(padrao, arquivo):
+                    raise ValueError(f"Objeto inesperado no marcador: {arquivo}")
+                # Confere todos os arquivos antes de liberar qualquer parte do lote.
+                tamanho = s3.head_object(Bucket=bucket, Key=arquivo)["ContentLength"]
+                if tamanho != item["bytes"]:
+                    raise ValueError(f"Tamanho diferente do marcador: {arquivo}")
+                concluidos[arquivo] = tamanho
+
+    for pagina in paginas.paginate(Bucket=bucket, Prefix="bronze/"):
+        for objeto in pagina.get("Contents", []):
+            chave = objeto["Key"]
+            # Reconhece os históricos antigos pelo nome SHA-256 do remetente anterior.
+            antigo = re.fullmatch(r"bronze/(monitoramento_v2_\d+|processos_\d+)/[0-9a-f]{64}\.csv", chave)
+            novo = chave in concluidos
+            if not antigo and not novo:
+                continue
+            if novo and objeto["Size"] != concluidos[chave]:
+                raise ValueError(f"Objeto alterado após a conferência: {chave}")
+            categoria = "metricas" if chave.startswith("bronze/monitoramento_v2_") else "processos"
+            yield categoria, chave
+
+
 def main():
     # Carrega bucket, perfil e região do arquivo .env.
     load_dotenv()
@@ -211,29 +255,13 @@ def main():
             with caminho_rejeitados.open("w", newline="", encoding="utf-8") as arquivo:
                 rejeitados = csv.writer(arquivo)
                 rejeitados.writerow(["origem", "linha", "motivo", "dados"])
-                # Percorre todas as páginas da listagem da Bronze.
-                paginas = s3.get_paginator("list_objects_v2")
-                for pagina in paginas.paginate(Bucket=bucket, Prefix="bronze/"):
-                    for objeto in pagina.get("Contents", []):
-                        chave = objeto["Key"]
-                        # Ignora pastas e arquivos do teste manual inicial.
-                        if not chave.endswith(".csv") or chave.startswith("bronze/testes/"):
-                            continue
-                        # Escolhe o tratamento pelo prefixo do arquivo.
-                        if chave.startswith("bronze/monitoramento_v2_"):
-                            categoria = "metricas"
-                        elif chave.startswith("bronze/processos_"):
-                            categoria = "processos"
-                        else:
-                            continue
-
-                        print(f"Lendo: {chave}")
-                        # Lê o conteúdo do objeto no S3.
-                        resposta = s3.get_object(Bucket=bucket, Key=chave)
-                        # Converte os bytes recebidos em texto para o leitor CSV.
-                        with io.TextIOWrapper(resposta["Body"], encoding="utf-8-sig", newline="") as entrada:
-                            processar_csv(conexao, categoria, entrada, chave, rejeitados, contagem)
-                        contagem["arquivos"] += 1
+                # Lê históricos antigos e apenas lotes novos com envio concluído.
+                for categoria, chave in listar_arquivos_prontos(s3, bucket):
+                    print(f"Lendo: {chave}")
+                    resposta = s3.get_object(Bucket=bucket, Key=chave)
+                    with io.TextIOWrapper(resposta["Body"], encoding="utf-8-sig", newline="") as entrada:
+                        processar_csv(conexao, categoria, entrada, chave, rejeitados, contagem)
+                    contagem["arquivos"] += 1
 
             if contagem["arquivos"] == 0:
                 raise ValueError("Nenhum CSV reconhecido na Bronze; execute enviar-bronze.py primeiro.")
