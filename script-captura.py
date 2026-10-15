@@ -1,3 +1,5 @@
+from pathlib import Path
+from lotes import LotesCaptura
 import platform
 import socket
 import requests
@@ -13,12 +15,14 @@ from rich.prompt import Prompt
 from rich.align import Align
 from dotenv import load_dotenv
 
+# Carrega o endereço da API e as credenciais de login do .env.
 load_dotenv()
 
 server_id = 0
 empresa_id = 0
 nome_empresa = "Stream Guard"
 
+# Define os recursos cadastrados para a máquina monitorada.
 def montar_componentes():
     return [
         {"tipo": "CPU", "nome": "CPU"},
@@ -27,6 +31,7 @@ def montar_componentes():
         {"tipo": "REDE", "nome": "Rede da máquina"}
     ]
 
+# Define os tipos e unidades das métricas conhecidas pelo agente.
 def montar_metricas():
     return {
         "CPU": [
@@ -50,6 +55,7 @@ def montar_metricas():
         ]
     }
 
+# Solicita à API o cadastro ou a identificação do equipamento existente.
 def cadastrar_servidor():
     server_info = {
         "empresa_id": empresa_id,
@@ -68,6 +74,7 @@ def cadastrar_servidor():
     console.print(f"[red]Erro ao cadastrar servidor: {response.status_code}[/red]")
     return None
 
+# Solicita os componentes e guarda os IDs retornados pela API.
 def cadastrar_componentes():
     componentes = montar_componentes()
     componentes_cadastrados = []
@@ -97,6 +104,7 @@ def cadastrar_componentes():
 
     return componentes_cadastrados
 
+# Vincula as métricas aos componentes identificados.
 def cadastrar_metricas(componentes):
     metricas_modelo = montar_metricas()
     metricas_cadastradas = []
@@ -129,6 +137,7 @@ def cadastrar_metricas(componentes):
 
 console = Console()
 
+# Autentica o usuário e identifica empresa, equipamento e componentes.
 def realizar_login():
     console.clear()
 
@@ -213,6 +222,7 @@ def realizar_login():
 
     return empresa_id
 
+# Converte a diferença dos contadores em bytes por segundo.
 def calcular_taxa(contador_inicial, contador_final, campo, segundos):
     if contador_inicial is None or contador_final is None:
         return None
@@ -224,6 +234,7 @@ def calcular_taxa(contador_inicial, contador_final, campo, segundos):
     return diferenca / segundos
 
 
+# Faz a primeira leitura necessária para medir CPU dos processos.
 def preparar_processos():
     processos = []
     for processo in psutil.process_iter():
@@ -235,6 +246,7 @@ def preparar_processos():
     return processos
 
 
+# Consulta processos preparados; ignora os encerrados ou sem permissão.
 def capturar_processos(processos, timestamp):
     registros = []
     for processo in processos:
@@ -254,6 +266,7 @@ def capturar_processos(processos, timestamp):
     return registros
 
 
+# Função anterior de gravação; o monitoramento em lotes usa LotesCaptura.
 def gravar_processos(caminho, registros):
     headers = ["servidor_id", "timestamp", "pid", "nome", "status", "uso_cpu", "ram_bytes"]
     if os.path.exists(caminho):
@@ -268,6 +281,7 @@ def gravar_processos(caminho, registros):
         writer.writerows(registros)
 
 
+# Relaciona os nomes das métricas no banco às colunas dos CSVs.
 def obter_campos_metricas():
     return {
         "USO_CPU": "uso_cpu",
@@ -284,8 +298,10 @@ def obter_campos_metricas():
     }
 
 
+# Consulta os recursos necessários às métricas solicitadas nesta rodada.
 def capturar_metricas(tipos):
     campos = obter_campos_metricas()
+    # O conjunto evita tipos repetidos e permite comparar grupos de métricas.
     tipos = set(tipos)
 
     desconhecidos = tipos - campos.keys()
@@ -301,10 +317,12 @@ def capturar_metricas(tipos):
     medir_io_disco = bool(tipos & tipos_io_disco)
     medir_rede = bool(tipos & tipos_rede)
 
+    # Lê contadores somente quando alguma taxa correspondente foi solicitada.
     disco_inicial = psutil.disk_io_counters() if medir_io_disco else None
     rede_inicial = psutil.net_io_counters() if medir_rede else None
     inicio = time.monotonic()
 
+    # Usa uma janela de um segundo para medir CPU ou calcular taxas.
     if "USO_CPU" in tipos:
         valores["uso_cpu"] = psutil.cpu_percent(interval=1)
     elif medir_io_disco or medir_rede:
@@ -314,6 +332,7 @@ def capturar_metricas(tipos):
     rede_final = psutil.net_io_counters() if medir_rede else None
     segundos = time.monotonic() - inicio
 
+    # Cargas compartilham uma consulta; valores sem suporte ficam ausentes.
     if tipos & tipos_carga:
         cargas = (
             psutil.getloadavg()
@@ -325,11 +344,13 @@ def capturar_metricas(tipos):
             cargas
         ))
 
+    # Uma consulta de memória fornece os dois indicadores.
     if tipos & {"USO_RAM", "RAM_DISPONIVEL"}:
         memoria = psutil.virtual_memory()
         valores["uso_ram"] = memoria.percent
         valores["ram_disponivel"] = memoria.available
 
+    # Mede a ocupação do disco raiz, separadamente das taxas de leitura/escrita.
     if "USO_DISCO" in tipos:
         raiz_disco = os.path.abspath(os.sep)
         valores["uso_disco"] = psutil.disk_usage(raiz_disco).percent
@@ -352,17 +373,15 @@ def capturar_metricas(tipos):
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
+    # Retorna apenas as métricas solicitadas, mesmo em consultas compartilhadas.
     for tipo in tipos:
         campo = campos[tipo]
         dados[campo] = valores[campo]
 
     return dados
 
+# Coordena os prazos de coleta, a atualização pela API e a gravação em lotes.
 def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atualizacao=60):
-    diretorio = "csvs"
-    os.makedirs(diretorio, exist_ok=True)
-    caminho_arquivo = os.path.join(diretorio, f"monitoramento_v2_{server_id}.csv")
-    caminho_processos = os.path.join(diretorio, f"processos_{server_id}.csv")
     campos = obter_campos_metricas()
     headers = [
         "servidor_id", "timestamp", "uso_cpu", "carga_1m",
@@ -371,14 +390,7 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
         "taxa_envio_rede", "taxa_recebimento_rede"
     ]
 
-    if os.path.exists(caminho_arquivo):
-        with open(caminho_arquivo, newline="", encoding="utf-8") as arquivo:
-            if next(csv.reader(arquivo), None) != headers:
-                raise ValueError("Cabeçalho do CSV incompatível.")
-    else:
-        with open(caminho_arquivo, "w", newline="", encoding="utf-8") as arquivo:
-            csv.DictWriter(arquivo, fieldnames=headers).writeheader()
-
+    # Permite localizar os parâmetros de cada métrica pelo seu tipo.
     configuracoes_por_tipo = {}
     for configuracao in configuracoes:
         tipo = configuracao["tipo"]
@@ -391,14 +403,20 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
     proxima_coleta_processos = agora
     proxima_atualizacao = agora + intervalo_atualizacao
 
-    print(f"Monitoramento ativo: {caminho_arquivo}")
+    # Usa lotes de um minuto; mantém os CSVs antigos intactos.
+    diretorio_lotes = Path(__file__).resolve().parent / "csvs" / "lotes"
+    lotes = LotesCaptura(server_id, headers, diretorio_lotes, intervalo=60)
+    print(f"Monitoramento ativo. Lotes em: {diretorio_lotes}")
 
     try:
         while True:
+            lotes.verificar_prazo()
             agora = time.monotonic()
 
+            # Atualiza os parâmetros sem reiniciar o agente.
             if agora >= proxima_atualizacao:
                 try:
+                    # Prepara e valida a atualização antes de substituir a anterior.
                     novas_configuracoes = buscar_configuracoes()
                     novas_por_tipo = {}
 
@@ -413,6 +431,7 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
 
                     for tipo, configuracao in novas_por_tipo.items():
                         anterior = configuracoes_por_tipo.get(tipo)
+                        # Preserva prazos inalterados; configurações novas ficam disponíveis agora.
                         if anterior == configuracao:
                             novos_prazos[tipo] = proximas_coletas[tipo]
                         else:
@@ -422,6 +441,7 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
                     proximas_coletas = novos_prazos
                     print("Configurações atualizadas pela API.")
 
+                # Falhas na atualização não descartam a última configuração válida.
                 except (requests.exceptions.RequestException, ValueError, KeyError) as erro:
                     print(f"Falha ao atualizar configurações: {erro}")
                     print("Mantendo a última configuração válida.")
@@ -429,7 +449,9 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
                 proxima_atualizacao = time.monotonic() + intervalo_atualizacao
 
             agora = time.monotonic()
+            # Registra o início da rodada, sem usar o horário fixo da inicialização.
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Seleciona apenas métricas habilitadas cujo prazo chegou.
             tipos_devidos = [
                 tipo
                 for tipo, configuracao in configuracoes_por_tipo.items()
@@ -445,14 +467,14 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
                 dados = capturar_metricas(tipos_devidos)
                 dados["timestamp"] = timestamp
 
-                with open(caminho_arquivo, "a", newline="", encoding="utf-8") as arquivo:
-                    writer = csv.DictWriter(arquivo, fieldnames=headers)
-                    writer.writerow(dados)
+                # Colunas não medidas nesta rodada ficam vazias, não recebem zero.
+                lotes.gravar_metricas(dados)
 
                 for tipo in tipos_devidos:
                     intervalo = configuracoes_por_tipo[tipo]["intervalo_coleta"]
                     proximas_coletas[tipo] = agora + intervalo
 
+            # Garante uma janela de medição para processos mesmo sem CPU/rede/disco gerais.
             if coletar_processos:
                 tipos_com_medicao_temporizada = {
                     "USO_CPU", "TAXA_LEITURA_DISCO", "TAXA_ESCRITA_DISCO",
@@ -462,14 +484,19 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
                     time.sleep(1)
 
                 registros = capturar_processos(processos, timestamp)
-                gravar_processos(caminho_processos, registros)
+                lotes.gravar_processos(registros)
                 proxima_coleta_processos = agora + intervalo_processos
 
+            # Evita um laço sem pausa enquanto aguarda os próximos prazos.
             time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("\nMonitoramento encerrado pelo usuário.")
+    finally:
+        # Finaliza também o lote parcial ao encerrar normalmente ou ocorrer erro.
+        lotes.fechar()
 
+# Lê e valida os parâmetros da tabela config_metrica por meio da API.
 def buscar_configuracoes():
     url = f"{os.getenv('WEB_DATA_VIZ_URL')}/metricas/configuracoes/{server_id}"
 
@@ -481,6 +508,7 @@ def buscar_configuracoes():
     if not isinstance(configuracoes, list) or not configuracoes:
         raise ValueError("A API não retornou configurações de métricas.")
 
+    # Rejeita configurações repetidas para não escolher uma arbitrariamente.
     tipos_encontrados = set()
 
     for configuracao in configuracoes:
