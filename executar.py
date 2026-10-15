@@ -35,13 +35,6 @@ def verificar_servicos(servicos):
             raise RuntimeError(f"{nome} encerrou com código {processo.returncode}. Confira a saída acima.")
 
 
-def aguardar(processo, servicos):
-    while processo.poll() is None:
-        verificar_servicos(servicos)
-        time.sleep(0.5)
-    return processo.returncode
-
-
 def encerrar(nome, processo):
     if processo is None or processo.poll() is not None:
         return
@@ -63,59 +56,42 @@ def encerrar(nome, processo):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Executa captura, envio e ETL periodicamente.")
-    parser.add_argument("--intervalo", type=int, default=60)
+    parser = argparse.ArgumentParser(description="Executa a captura local e o envio dos lotes para a Bronze.")
+    parser.add_argument("--intervalo-envio", type=int, default=15,
+                        help="Segundos entre verificações de lotes pendentes (padrão: 15).")
     argumentos = parser.parse_args()
-    if argumentos.intervalo <= 0:
+    if argumentos.intervalo_envio <= 0:
         raise ValueError("O intervalo deve ser positivo.")
 
-    for nome in ("script-captura.py", "lotes.py", "enviar-bronze.py", "etl.py", "gerar-gold.py"):
+    for nome in ("script-captura.py", "lotes.py", "enviar-bronze.py"):
         if not (RAIZ / nome).is_file():
             raise FileNotFoundError(f"Arquivo obrigatório ausente: {nome}")
 
-    # Impede duas automações locais de publicarem Silver/Gold simultaneamente.
+    # Impede que duas automações iniciem a captura na mesma pasta.
     caminho_trava = RAIZ / "automacao.lock"
     try:
         trava = caminho_trava.open("x", encoding="utf-8")
     except FileExistsError:
         raise RuntimeError("Existe automacao.lock. Confira se outra automação está rodando.")
 
-    captura = remetente = etapa = None
+    captura = remetente = None
     try:
         with trava:
             trava.write(str(os.getpid()))
             trava.flush()
-            print("Iniciando captura e envio. MySQL e API devem estar disponíveis.", flush=True)
+            print("Iniciando captura e envio. A API configurada no .env deve estar disponível.", flush=True)
             captura = iniciar("script-captura.py")
-            remetente = iniciar("enviar-bronze.py", "--continuo", "--intervalo", "15")
+            remetente = iniciar("enviar-bronze.py", "--continuo", "--intervalo", str(argumentos.intervalo_envio))
             servicos = [("Captura", captura), ("Envio", remetente)]
 
+            # Silver e Gold são processadas pelo serviço agendado na EC2.
             while True:
-                # Aguarda o intervalo configurado antes de iniciar outro ciclo do ETL.
-                prazo = time.monotonic() + argumentos.intervalo
-                while time.monotonic() < prazo:
-                    verificar_servicos(servicos)
-                    time.sleep(0.5)
-
-                print("\n[ETL] Atualizando Silver...", flush=True)
-                etapa = iniciar("etl.py")
-                if aguardar(etapa, servicos) != 0:
-                    print("[ETL] Falhou. Gold não será executada neste ciclo.", flush=True)
-                    etapa = None
-                    continue
-
-                print("[ETL] Atualizando Gold...", flush=True)
-                etapa = iniciar("gerar-gold.py")
-                if aguardar(etapa, servicos) != 0:
-                    print("[ETL] Gold falhou; confira os erros antes da próxima tentativa.", flush=True)
-                else:
-                    print("[ETL] Ciclo concluído.", flush=True)
-                etapa = None
+                verificar_servicos(servicos)
+                time.sleep(0.5)
 
     except KeyboardInterrupt:
         print("\nEncerramento solicitado.", flush=True)
     finally:
-        encerrar("etapa do ETL", etapa)
         # Fecha a captura antes do remetente, preservando o último lote pendente.
         encerrar("captura", captura)
         encerrar("envio", remetente)
