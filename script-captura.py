@@ -139,9 +139,13 @@ def realizar_login():
     console.print()
 
     # Login
-    email = Prompt.ask("[bold]E-mail[/bold]")
-    senha = Prompt.ask("[bold]Senha[/bold]", password=True)
-    console.print()
+    email = os.getenv("USUARIO_EMAIL")
+    senha = os.getenv("USUARIO_SENHA")
+
+    if not email or not senha:
+        email = Prompt.ask("[bold]E-mail[/bold]")
+        senha = Prompt.ask("[bold]Senha[/bold]", password=True)
+        console.print()
 
     # Autenticação
     with console.status("[cyan]Conectando ao Stream Guard...[/cyan]", spinner="dots"):
@@ -264,62 +268,102 @@ def gravar_processos(caminho, registros):
         writer.writerows(registros)
 
 
-def capturar_metricas():
-    disco_inicial = psutil.disk_io_counters()
-    rede_inicial = psutil.net_io_counters()
-    inicio = time.monotonic()
-
-    uso_cpu = psutil.cpu_percent(interval=1)
-
-    disco_final = psutil.disk_io_counters()
-    rede_final = psutil.net_io_counters()
-    segundos = time.monotonic() - inicio
-
-    if hasattr(psutil, "getloadavg"):
-        carga_1m, carga_5m, carga_15m = psutil.getloadavg()
-    else:
-        carga_1m = carga_5m = carga_15m = 0.0
-
-    memoria = psutil.virtual_memory()
-    uso_ram = memoria.percent
-    ram_disponivel = memoria.available
-
-    raiz_disco = os.path.abspath(os.sep)
-    disco = psutil.disk_usage(raiz_disco)
-    uso_disco = disco.percent
-
-    taxa_leitura = calcular_taxa(disco_inicial, disco_final, "read_bytes", segundos)
-    taxa_escrita = calcular_taxa(disco_inicial, disco_final, "write_bytes", segundos)
-    taxa_envio = calcular_taxa(rede_inicial, rede_final, "bytes_sent", segundos)
-    taxa_recebimento = calcular_taxa(rede_inicial, rede_final, "bytes_recv", segundos)
-
+def obter_campos_metricas():
     return {
-        "servidor_id": server_id,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "uso_cpu": uso_cpu,
-        "carga_1m": carga_1m,
-        "carga_5m": carga_5m,
-        "carga_15m": carga_15m,
-        "uso_ram": uso_ram,
-        "ram_disponivel": ram_disponivel,
-        "uso_disco": uso_disco,
-        "taxa_leitura_disco": taxa_leitura,
-        "taxa_escrita_disco": taxa_escrita,
-        "taxa_envio_rede": taxa_envio,
-        "taxa_recebimento_rede": taxa_recebimento
+        "USO_CPU": "uso_cpu",
+        "CARGA_CPU_1M": "carga_1m",
+        "CARGA_CPU_5M": "carga_5m",
+        "CARGA_CPU_15M": "carga_15m",
+        "USO_RAM": "uso_ram",
+        "RAM_DISPONIVEL": "ram_disponivel",
+        "USO_DISCO": "uso_disco",
+        "TAXA_LEITURA_DISCO": "taxa_leitura_disco",
+        "TAXA_ESCRITA_DISCO": "taxa_escrita_disco",
+        "TAXA_ENVIO_REDE": "taxa_envio_rede",
+        "TAXA_RECEBIMENTO_REDE": "taxa_recebimento_rede"
     }
 
-def iniciar_monitoramento(intervalo_segundos=5, intervalo_processos=40):
+
+def capturar_metricas(tipos):
+    campos = obter_campos_metricas()
+    tipos = set(tipos)
+
+    desconhecidos = tipos - campos.keys()
+    if desconhecidos:
+        raise ValueError(f"Métricas não suportadas: {desconhecidos}")
+
+    valores = {}
+
+    tipos_io_disco = {"TAXA_LEITURA_DISCO", "TAXA_ESCRITA_DISCO"}
+    tipos_rede = {"TAXA_ENVIO_REDE", "TAXA_RECEBIMENTO_REDE"}
+    tipos_carga = {"CARGA_CPU_1M", "CARGA_CPU_5M", "CARGA_CPU_15M"}
+
+    medir_io_disco = bool(tipos & tipos_io_disco)
+    medir_rede = bool(tipos & tipos_rede)
+
+    disco_inicial = psutil.disk_io_counters() if medir_io_disco else None
+    rede_inicial = psutil.net_io_counters() if medir_rede else None
+    inicio = time.monotonic()
+
+    if "USO_CPU" in tipos:
+        valores["uso_cpu"] = psutil.cpu_percent(interval=1)
+    elif medir_io_disco or medir_rede:
+        time.sleep(1)
+
+    disco_final = psutil.disk_io_counters() if medir_io_disco else None
+    rede_final = psutil.net_io_counters() if medir_rede else None
+    segundos = time.monotonic() - inicio
+
+    if tipos & tipos_carga:
+        cargas = (
+            psutil.getloadavg()
+            if hasattr(psutil, "getloadavg")
+            else (None, None, None)
+        )
+        valores.update(zip(
+            ["carga_1m", "carga_5m", "carga_15m"],
+            cargas
+        ))
+
+    if tipos & {"USO_RAM", "RAM_DISPONIVEL"}:
+        memoria = psutil.virtual_memory()
+        valores["uso_ram"] = memoria.percent
+        valores["ram_disponivel"] = memoria.available
+
+    if "USO_DISCO" in tipos:
+        raiz_disco = os.path.abspath(os.sep)
+        valores["uso_disco"] = psutil.disk_usage(raiz_disco).percent
+
+    contadores = {
+        "TAXA_LEITURA_DISCO": (disco_inicial, disco_final, "read_bytes"),
+        "TAXA_ESCRITA_DISCO": (disco_inicial, disco_final, "write_bytes"),
+        "TAXA_ENVIO_REDE": (rede_inicial, rede_final, "bytes_sent"),
+        "TAXA_RECEBIMENTO_REDE": (rede_inicial, rede_final, "bytes_recv")
+    }
+
+    for tipo in tipos & contadores.keys():
+        contador_inicial, contador_final, campo = contadores[tipo]
+        valores[campos[tipo]] = calcular_taxa(
+            contador_inicial, contador_final, campo, segundos
+        )
+
+    dados = {
+        "servidor_id": server_id,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    for tipo in tipos:
+        campo = campos[tipo]
+        dados[campo] = valores[campo]
+
+    return dados
+
+def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atualizacao=60):
     diretorio = "csvs"
     os.makedirs(diretorio, exist_ok=True)
-
-    caminho_arquivo = os.path.join(
-        diretorio, f"monitoramento_v2_{server_id}.csv"
-    )
-    caminho_processos = os.path.join(
-        diretorio, f"processos_{server_id}.csv"
-    )
-
+    caminho_arquivo = os.path.join(diretorio, f"monitoramento_v2_{server_id}.csv")
+    caminho_processos = os.path.join(diretorio, f"processos_{server_id}.csv")
+    campos = obter_campos_metricas()
     headers = [
         "servidor_id", "timestamp", "uso_cpu", "carga_1m",
         "carga_5m", "carga_15m", "uso_ram", "ram_disponivel",
@@ -329,51 +373,138 @@ def iniciar_monitoramento(intervalo_segundos=5, intervalo_processos=40):
 
     if os.path.exists(caminho_arquivo):
         with open(caminho_arquivo, newline="", encoding="utf-8") as arquivo:
-            cabecalho_existente = next(csv.reader(arquivo), None)
-
-        if cabecalho_existente != headers:
-            raise ValueError(
-                f"Cabeçalho incompatível no arquivo {caminho_arquivo}"
-            )
+            if next(csv.reader(arquivo), None) != headers:
+                raise ValueError("Cabeçalho do CSV incompatível.")
     else:
-        with open(
-            caminho_arquivo, mode="w", newline="", encoding="utf-8"
-        ) as arquivo:
-            writer = csv.DictWriter(arquivo, fieldnames=headers)
-            writer.writeheader()
+        with open(caminho_arquivo, "w", newline="", encoding="utf-8") as arquivo:
+            csv.DictWriter(arquivo, fieldnames=headers).writeheader()
 
-    proxima_coleta_processos = time.monotonic()
+    configuracoes_por_tipo = {}
+    for configuracao in configuracoes:
+        tipo = configuracao["tipo"]
+        if tipo not in campos:
+            raise ValueError(f"Métrica não suportada: {tipo}")
+        configuracoes_por_tipo[tipo] = configuracao
 
-    print(f"Monitoramento ativo. Gravando dados em '{caminho_arquivo}'...")
+    agora = time.monotonic()
+    proximas_coletas = {tipo: agora for tipo in configuracoes_por_tipo}
+    proxima_coleta_processos = agora
+    proxima_atualizacao = agora + intervalo_atualizacao
+
+    print(f"Monitoramento ativo: {caminho_arquivo}")
 
     try:
         while True:
             agora = time.monotonic()
+
+            if agora >= proxima_atualizacao:
+                try:
+                    novas_configuracoes = buscar_configuracoes()
+                    novas_por_tipo = {}
+
+                    for configuracao in novas_configuracoes:
+                        tipo = configuracao["tipo"]
+                        if tipo not in campos:
+                            raise ValueError(f"Métrica não suportada: {tipo}")
+                        novas_por_tipo[tipo] = configuracao
+
+                    momento_atualizacao = time.monotonic()
+                    novos_prazos = {}
+
+                    for tipo, configuracao in novas_por_tipo.items():
+                        anterior = configuracoes_por_tipo.get(tipo)
+                        if anterior == configuracao:
+                            novos_prazos[tipo] = proximas_coletas[tipo]
+                        else:
+                            novos_prazos[tipo] = momento_atualizacao
+
+                    configuracoes_por_tipo = novas_por_tipo
+                    proximas_coletas = novos_prazos
+                    print("Configurações atualizadas pela API.")
+
+                except (requests.exceptions.RequestException, ValueError, KeyError) as erro:
+                    print(f"Falha ao atualizar configurações: {erro}")
+                    print("Mantendo a última configuração válida.")
+
+                proxima_atualizacao = time.monotonic() + intervalo_atualizacao
+
+            agora = time.monotonic()
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            tipos_devidos = [
+                tipo
+                for tipo, configuracao in configuracoes_por_tipo.items()
+                if configuracao["habilitado"] == 1
+                and agora >= proximas_coletas[tipo]
+            ]
             coletar_processos = agora >= proxima_coleta_processos
 
             if coletar_processos:
                 processos = preparar_processos()
 
-            dados = capturar_metricas()
+            if tipos_devidos:
+                dados = capturar_metricas(tipos_devidos)
+                dados["timestamp"] = timestamp
+
+                with open(caminho_arquivo, "a", newline="", encoding="utf-8") as arquivo:
+                    writer = csv.DictWriter(arquivo, fieldnames=headers)
+                    writer.writerow(dados)
+
+                for tipo in tipos_devidos:
+                    intervalo = configuracoes_por_tipo[tipo]["intervalo_coleta"]
+                    proximas_coletas[tipo] = agora + intervalo
 
             if coletar_processos:
-                registros_processos = capturar_processos(
-                    processos, dados["timestamp"]
-                )
-                gravar_processos(caminho_processos, registros_processos)
+                tipos_com_medicao_temporizada = {
+                    "USO_CPU", "TAXA_LEITURA_DISCO", "TAXA_ESCRITA_DISCO",
+                    "TAXA_ENVIO_REDE", "TAXA_RECEBIMENTO_REDE"
+                }
+                if not set(tipos_devidos) & tipos_com_medicao_temporizada:
+                    time.sleep(1)
+
+                registros = capturar_processos(processos, timestamp)
+                gravar_processos(caminho_processos, registros)
                 proxima_coleta_processos = agora + intervalo_processos
 
-            with open(
-                caminho_arquivo, mode="a", newline="", encoding="utf-8"
-            ) as arquivo:
-                writer = csv.DictWriter(arquivo, fieldnames=headers)
-                writer.writerow(dados)
-
-            time.sleep(intervalo_segundos)
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("\nMonitoramento encerrado pelo usuário.")
 
+def buscar_configuracoes():
+    url = f"{os.getenv('WEB_DATA_VIZ_URL')}/metricas/configuracoes/{server_id}"
+
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+
+    configuracoes = response.json()
+
+    if not isinstance(configuracoes, list) or not configuracoes:
+        raise ValueError("A API não retornou configurações de métricas.")
+
+    tipos_encontrados = set()
+
+    for configuracao in configuracoes:
+        tipo = configuracao["tipo"]
+
+        if tipo in tipos_encontrados:
+            raise ValueError(f"Mais de uma configuração para a métrica {tipo}.")
+
+        tipos_encontrados.add(tipo)
+
+        if configuracao["id_config_metrica"] is None:
+            raise ValueError(f"A métrica {tipo} não possui configuração.")
+
+        if configuracao["habilitado"] not in (0, 1):
+            raise ValueError(f"Habilitação inválida para a métrica {tipo}.")
+
+        intervalo = configuracao["intervalo_coleta"]
+
+        if not isinstance(intervalo, int) or intervalo <= 0:
+            raise ValueError(f"Intervalo inválido para a métrica {tipo}.")
+
+    return configuracoes
+
 if __name__ == "__main__":
     if realizar_login():
-        iniciar_monitoramento()
+        configuracoes = buscar_configuracoes()
+        iniciar_monitoramento(configuracoes)
