@@ -20,7 +20,7 @@ if (( ${#pacotes[@]} )); then
     sudo apt-get install -y "${pacotes[@]}"
 fi
 
-# Mantém os dois repositórios na estrutura esperada pelo instalador.
+# Mantém os três repositórios na estrutura esperada pelo instalador.
 DESTINO="$HOME/streamguard"
 mkdir -p "$DESTINO"
 baixar() {
@@ -33,8 +33,9 @@ baixar() {
     fi
 }
 baixar stream-guard-site-institucional develop
-baixar stream-guard-script-captura feature/ajuste-script
-cd "$DESTINO/stream-guard-script-captura"
+baixar stream-guard-script-captura "${STREAMGUARD_CAPTURA_BRANCH:-main}"
+baixar stream-guard-etl "${STREAMGUARD_ETL_BRANCH:-main}"
+cd "$DESTINO/stream-guard-etl"
 
 # Pergunta apenas os dados específicos do ambiente. Não solicita chaves AWS.
 read -r -p 'Nome do seu bucket S3 (sem s3://): ' BUCKET
@@ -75,8 +76,8 @@ caminho.write_text('\n'.join(linhas) + '\n', encoding='utf-8')
 caminho.chmod(0o600)
 PY
 
-# Reutiliza a instalação validada. Uma falha interrompe o fluxo.
-bash instalar.sh
+# Executa o instalador conjunto. Uma falha interrompe o fluxo.
+bash "$DESTINO/stream-guard-script-captura/instalar.sh"
 
 # Verifica se a API responde e consegue consultar o banco inicializado.
 # Não exige que haja dados de captura em um bucket novo.
@@ -102,4 +103,4 @@ PY
 
 printf '\nPreparação concluída. A API usa a porta 3333 e a ETL está agendada.\n'
 printf 'Em um bucket novo, os arquivos Silver/Gold dependem do primeiro envio de dados reais.\n'
-printf 'O computador monitorado usa executar.py, com o endereço público desta API no .env.\n'
+printf 'A ETL usa seu próprio .env. O computador monitorado usa executar.py, com o endereço público desta API no .env.\n'

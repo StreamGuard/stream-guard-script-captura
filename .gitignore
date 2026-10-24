@@ -1,5 +1,7 @@
 .venv/
 .env
+.env.*
+!.env.example
 
 # Cache e travas de execução
 __pycache__/
@@ -8,7 +10,7 @@ automacao.lock
 .processamento.lock
 
 # Lotes e resultados gerados
-csvs/lotes/
+/csvs/
 dados-analise/
 resultados-analise/
 validacao-gold/
