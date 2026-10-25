@@ -74,7 +74,7 @@ def main():
     if argumentos.intervalo_envio <= 0:
         raise ValueError("O intervalo deve ser positivo.")
 
-    for nome in ("script-captura.py", "lotes.py", "enviar-bronze.py", "configuracao_captura.py", "simulacao.py"):
+    for nome in ("script-captura.py", "lotes.py", "enviar-bronze.py", "configuracao_captura.py", "simulacao.py", "api_captura.py"):
         if not (RAIZ / nome).is_file():
             raise FileNotFoundError(f"Arquivo obrigatório ausente: {nome}")
 

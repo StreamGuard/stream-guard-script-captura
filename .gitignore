@@ -18,3 +18,7 @@ validacao-silver/
 
 # Cópias locais das configurações
 .env.antes-bootstrap
+
+# Identidade local da instalação (não é credencial)
+/identidade-agente.json
+/identidade-agente.json.tmp

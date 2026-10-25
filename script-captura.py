@@ -1,7 +1,7 @@
 from pathlib import Path
 import argparse
-import hashlib
-from configuracao_captura import adicionar_argumentos, obter_modo, obter_diretorio_lotes, parametros_simulacao
+from api_captura import ApiCaptura
+from configuracao_captura import adicionar_argumentos, obter_modo, obter_diretorio_lotes, parametros_simulacao, carregar_identidade, confirmar_identidade
 from simulacao import SimuladorMetricas
 from lotes import LotesCaptura
 import platform
@@ -20,11 +20,12 @@ from rich.align import Align
 from dotenv import load_dotenv
 
 # Carrega o endereço da API e as credenciais de login do .env.
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 server_id = 0
 empresa_id = 0
 nome_empresa = "Stream Guard"
+api = None
 
 # Define os recursos cadastrados para a máquina monitorada.
 def montar_componentes():
@@ -61,27 +62,23 @@ def montar_metricas():
 
 # Solicita à API o cadastro ou a identificação do equipamento existente.
 def cadastrar_servidor(modo="real"):
+    identidade = carregar_identidade(socket.gethostname())
     server_info = {
-        "empresa_id": empresa_id,
-        "codigo_agente": f"SERVIDOR_{socket.gethostname()}",
+        "codigo_agente": identidade["codigo_agente"],
         "hostname": socket.gethostname(),
         "sistema_operacional": platform.system(),
         "versao_so": platform.version(),
         "arquitetura": platform.machine(),
     }
 
-    if obter_modo(modo) == "simulado":
-        identificador = hashlib.sha256(server_info["codigo_agente"].encode("utf-8")).hexdigest()[:32]
-        server_info["codigo_agente"] = f"SIMULADO_{identificador}"
-        server_info["hostname"] = f"SIMULADO-{server_info['hostname']}"[:100]
-
-    response = requests.post(f"{os.getenv('WEB_DATA_VIZ_URL')}/servidores/cadastrar", json=server_info)
-
-    if response.status_code in (200, 201):
-        return response.json()
-
-    console.print(f"[red]Erro ao cadastrar servidor: {response.status_code}[/red]")
-    return None
+    if not identidade["confirmado"]:
+        server_info["codigos_anteriores"] = identidade["codigos_anteriores"]
+    dados = api.pedir("POST", "/servidores/cadastrar", server_info)
+    if (not isinstance(dados, dict) or type(dados.get("id")) is not int or dados["id"] <= 0 or
+            type(dados.get("empresa_id")) is not int or dados["empresa_id"] != empresa_id):
+        raise ValueError("A API não confirmou o servidor da empresa autenticada.")
+    confirmar_identidade(identidade, dados.get("codigo_agente"))
+    return dados
 
 # Solicita os componentes e guarda os IDs retornados pela API.
 def cadastrar_componentes():
@@ -95,21 +92,11 @@ def cadastrar_componentes():
             "nome": componente["nome"]
         }
 
-        response = requests.post(
-            f"{os.getenv('WEB_DATA_VIZ_URL')}/componentes/cadastrar",
-            json=body
-        )
-
-        if response.status_code == 201:
-            dados_comp = response.json()
-            if "tipo" not in dados_comp:
-                dados_comp["tipo"] = componente["tipo"]
-            componentes_cadastrados.append(dados_comp)
-        else:
-         console.print(
-        f"[red]Erro ao cadastrar componente {componente['nome']} "
-        f"(HTTP {response.status_code}): {response.text}[/red]"
-    )
+        dados_comp = api.pedir("POST", "/componentes/cadastrar", body)
+        if not isinstance(dados_comp, dict) or type(dados_comp.get("id")) is not int or dados_comp["id"] <= 0:
+            raise ValueError("A API não confirmou o cadastro do componente.")
+        dados_comp.setdefault("tipo", componente["tipo"])
+        componentes_cadastrados.append(dados_comp)
 
     return componentes_cadastrados
 
@@ -134,13 +121,10 @@ def cadastrar_metricas(componentes):
                 "unidade": metrica["unidade"]
             }
 
-            response = requests.post(
-                f"{os.getenv('WEB_DATA_VIZ_URL')}/metricas/cadastrarMetrica",
-                json=payload
-            )
-
-            if response.status_code in (200, 201):
-                metricas_cadastradas.append(response.json())
+            dados = api.pedir("POST", "/metricas/cadastrarMetrica", payload)
+            if not isinstance(dados, dict) or dados.get("componente_id") != componente_id or dados.get("tipo") != metrica["tipo"]:
+                raise ValueError("A API não confirmou o cadastro da métrica.")
+            metricas_cadastradas.append(dados)
 
     return metricas_cadastradas
 
@@ -150,7 +134,7 @@ console = Console()
 def realizar_login(modo="real"):
     console.clear()
     if modo == "simulado":
-        console.print("[yellow]MODO SIMULADO: métricas sintéticas em equipamento separado.[/yellow]")
+        console.print("[yellow]MODO SIMULADO: métricas sintéticas com a identidade desta instalação.[/yellow]")
 
     # Cabeçalho
     console.print()
@@ -167,27 +151,16 @@ def realizar_login(modo="real"):
         senha = Prompt.ask("[bold]Senha[/bold]", password=True)
         console.print()
 
-    # Autenticação
+    global api, empresa_id
+    if api is not None:
+        api.fechar()
+    api = ApiCaptura(os.getenv("WEB_DATA_VIZ_URL", ""))
     with console.status("[cyan]Conectando ao Stream Guard...[/cyan]", spinner="dots"):
-        try:
-            response = requests.post(
-                f"{os.getenv('WEB_DATA_VIZ_URL')}/usuarios/autenticar",
-                json={"emailServer": email, "senhaServer": senha}
-            )
-        except requests.exceptions.RequestException as e:
-            console.print(f"[red]✗[/red] Erro de conexão com a API: {e}")
-            return None
-
-    if response.status_code != 200:
-        console.print("[red]✗[/red] Falha na autenticação.")
-        return None
-
-    console.print("[green]✓[/green] Usuário autenticado.")
-
-    dados_login = response.json()
-
-    global empresa_id
+        dados_login = api.autenticar(email, senha)
     empresa_id = dados_login.get("empresa_id")
+    if type(empresa_id) is not int or empresa_id <= 0:
+        raise ValueError("O usuário autenticado não possui uma empresa disponível para captura.")
+    console.print("[green]✓[/green] Usuário autenticado.")
 
     # Empresa
     nome_empresa = dados_login.get("nome_empresa", "Empresa Desconhecida")
@@ -522,12 +495,7 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
 
 # Lê e valida os parâmetros da tabela config_metrica por meio da API.
 def buscar_configuracoes():
-    url = f"{os.getenv('WEB_DATA_VIZ_URL')}/metricas/configuracoes/{server_id}"
-
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-
-    configuracoes = response.json()
+    configuracoes = api.pedir("GET", f"/metricas/configuracoes/{server_id}")
 
     if not isinstance(configuracoes, list) or not configuracoes:
         raise ValueError("A API não retornou configurações de métricas.")
@@ -560,12 +528,19 @@ def main():
     parser = argparse.ArgumentParser(description="Captura real ou simulada do StreamGuard.")
     adicionar_argumentos(parser)
     argumentos = parser.parse_args()
-    modo = obter_modo(argumentos.modo)
-    parametros = parametros_simulacao(argumentos, modo)
-    if realizar_login(modo):
-        configuracoes = buscar_configuracoes()
-        simulador = SimuladorMetricas(**parametros) if modo == "simulado" else None
-        iniciar_monitoramento(configuracoes, simulador=simulador, modo=modo)
+    try:
+        modo = obter_modo(argumentos.modo)
+        parametros = parametros_simulacao(argumentos, modo)
+        if realizar_login(modo):
+            configuracoes = buscar_configuracoes()
+            simulador = SimuladorMetricas(**parametros) if modo == "simulado" else None
+            iniciar_monitoramento(configuracoes, simulador=simulador, modo=modo)
+    except ValueError as erro:
+        console.print(f"[red]Não foi possível iniciar a captura: {erro}[/red]")
+        raise SystemExit(1) from None
+    finally:
+        if api is not None:
+            api.fechar()
 
 
 if __name__ == "__main__":
