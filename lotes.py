@@ -1,4 +1,5 @@
 import csv
+from configuracao_captura import obter_modo
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,9 +7,10 @@ from uuid import uuid4
 
 
 class LotesCaptura:
-    def __init__(self, servidor_id, campos_metricas, diretorio, intervalo=60):
+    def __init__(self, servidor_id, campos_metricas, diretorio, intervalo=60, modo="real"):
         if intervalo <= 0:
             raise ValueError("O intervalo dos lotes deve ser positivo.")
+        self.modo = obter_modo(modo)
         self.servidor_id = servidor_id
         self.campos_metricas = campos_metricas
         self.intervalo = intervalo
@@ -25,7 +27,8 @@ class LotesCaptura:
     def iniciar_lote(self):
         # Horário UTC e UUID evitam misturar lotes de máquinas ou execuções distintas.
         horario = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        nome = f"servidor_{self.servidor_id}_{horario}_{uuid4().hex}"
+        prefixo = "simulado_" if self.modo == "simulado" else ""
+        nome = f"{prefixo}servidor_{self.servidor_id}_{horario}_{uuid4().hex}"
         self.pasta = self.abertos / nome
         self.pasta.mkdir()
         self.inicio = time.monotonic()

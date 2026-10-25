@@ -8,9 +8,13 @@ from pathlib import Path
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
+from configuracao_captura import adicionar_argumentos, obter_modo, obter_diretorio_lotes
 
 
-def enviar_lote(s3, bucket, lote, enviados):
+def enviar_lote(s3, bucket, lote, enviados, modo="real"):
+    modo = obter_modo(modo)
+    if lote.name.startswith("simulado_") != (modo == "simulado"):
+        raise ValueError("O modo do remetente não corresponde à identificação do lote.")
     # Aceita apenas os CSVs gerados pela captura, sem arquivos desconhecidos.
     arquivos = sorted(lote.iterdir())
     if not arquivos:
@@ -41,6 +45,8 @@ def enviar_lote(s3, bucket, lote, enviados):
         "concluido_em_utc": datetime.now(timezone.utc).isoformat(),
         "objetos": objetos,
     }
+    if modo == "simulado":
+        marcador["modo"] = "simulado"
     s3.put_object(
         Bucket=bucket,
         Key=f"bronze/lotes-concluidos/{lote.name}.json",
@@ -53,7 +59,7 @@ def enviar_lote(s3, bucket, lote, enviados):
     print(f"Lote concluído e arquivado localmente: {lote.name}")
 
 
-def enviar_pendentes(s3, bucket, pendentes, enviados):
+def enviar_pendentes(s3, bucket, pendentes, enviados, modo="real"):
     lotes = sorted(pasta for pasta in pendentes.iterdir() if pasta.is_dir())
     if not lotes:
         print("Nenhum lote pendente.")
@@ -62,7 +68,7 @@ def enviar_pendentes(s3, bucket, pendentes, enviados):
     falhas = 0
     for lote in lotes:
         try:
-            enviar_lote(s3, bucket, lote, enviados)
+            enviar_lote(s3, bucket, lote, enviados, modo=modo)
         except (BotoCoreError, ClientError, OSError, ValueError) as erro:
             # Mantém o lote para nova tentativa; não apaga arquivos nem dados do S3.
             falhas += 1
@@ -75,6 +81,7 @@ def main():
     parser = argparse.ArgumentParser(description="Envia lotes fechados à Bronze.")
     parser.add_argument("--continuo", action="store_true")
     parser.add_argument("--intervalo", type=int, default=15)
+    adicionar_argumentos(parser, simulacao=False)
     argumentos = parser.parse_args()
     if argumentos.intervalo <= 0:
         raise ValueError("O intervalo de verificação deve ser positivo.")
@@ -85,7 +92,9 @@ def main():
     if not bucket:
         raise ValueError("Configure S3_BUCKET no .env.")
 
-    pasta_lotes = raiz / "csvs" / "lotes"
+    modo = obter_modo(argumentos.modo)
+    pasta_lotes = obter_diretorio_lotes(modo)
+    print(f"Remetente em modo {modo.upper()}. Lotes em: {pasta_lotes}")
     pendentes = pasta_lotes / "pendentes"
     enviados = pasta_lotes / "enviados"
     pendentes.mkdir(parents=True, exist_ok=True)
@@ -108,7 +117,7 @@ def main():
             )
             s3 = sessao.client("s3")
             while True:
-                falhas = enviar_pendentes(s3, bucket, pendentes, enviados)
+                falhas = enviar_pendentes(s3, bucket, pendentes, enviados, modo=modo)
                 if not argumentos.continuo:
                     if falhas:
                         raise SystemExit(1)

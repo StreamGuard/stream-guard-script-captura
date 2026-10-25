@@ -5,6 +5,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from dotenv import load_dotenv
+from configuracao_captura import adicionar_argumentos, obter_modo, parametros_simulacao
 
 
 RAIZ = Path(__file__).resolve().parent
@@ -56,14 +58,23 @@ def encerrar(nome, processo):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Executa a captura local e o envio dos lotes para a Bronze.")
+    load_dotenv(RAIZ / ".env")
+    parser = argparse.ArgumentParser(description="Executa a captura real ou simulada e o envio à Bronze.")
     parser.add_argument("--intervalo-envio", type=int, default=15,
                         help="Segundos entre verificações de lotes pendentes (padrão: 15).")
+    adicionar_argumentos(parser)
     argumentos = parser.parse_args()
+    modo = obter_modo(argumentos.modo)
+    parametros = parametros_simulacao(argumentos, modo)
+    argumentos_captura = ["--modo", modo]
+    if modo == "simulado":
+        argumentos_captura += ["--duracao-fase", str(parametros["duracao_fase"])]
+        if parametros["semente"] is not None:
+            argumentos_captura += ["--semente", str(parametros["semente"])]
     if argumentos.intervalo_envio <= 0:
         raise ValueError("O intervalo deve ser positivo.")
 
-    for nome in ("script-captura.py", "lotes.py", "enviar-bronze.py"):
+    for nome in ("script-captura.py", "lotes.py", "enviar-bronze.py", "configuracao_captura.py", "simulacao.py"):
         if not (RAIZ / nome).is_file():
             raise FileNotFoundError(f"Arquivo obrigatório ausente: {nome}")
 
@@ -79,9 +90,9 @@ def main():
         with trava:
             trava.write(str(os.getpid()))
             trava.flush()
-            print("Iniciando captura e envio. A API configurada no .env deve estar disponível.", flush=True)
-            captura = iniciar("script-captura.py")
-            remetente = iniciar("enviar-bronze.py", "--continuo", "--intervalo", str(argumentos.intervalo_envio))
+            print(f"Iniciando modo {modo.upper()} e envio ao S3 configurado. A API deve estar disponível.", flush=True)
+            captura = iniciar("script-captura.py", *argumentos_captura)
+            remetente = iniciar("enviar-bronze.py", "--continuo", "--intervalo", str(argumentos.intervalo_envio), "--modo", modo)
             servicos = [("Captura", captura), ("Envio", remetente)]
 
             # Silver e Gold são processadas pelo serviço agendado na EC2.

@@ -1,4 +1,8 @@
 from pathlib import Path
+import argparse
+import hashlib
+from configuracao_captura import adicionar_argumentos, obter_modo, obter_diretorio_lotes, parametros_simulacao
+from simulacao import SimuladorMetricas
 from lotes import LotesCaptura
 import platform
 import socket
@@ -56,7 +60,7 @@ def montar_metricas():
     }
 
 # Solicita à API o cadastro ou a identificação do equipamento existente.
-def cadastrar_servidor():
+def cadastrar_servidor(modo="real"):
     server_info = {
         "empresa_id": empresa_id,
         "codigo_agente": f"SERVIDOR_{socket.gethostname()}",
@@ -65,6 +69,11 @@ def cadastrar_servidor():
         "versao_so": platform.version(),
         "arquitetura": platform.machine(),
     }
+
+    if obter_modo(modo) == "simulado":
+        identificador = hashlib.sha256(server_info["codigo_agente"].encode("utf-8")).hexdigest()[:32]
+        server_info["codigo_agente"] = f"SIMULADO_{identificador}"
+        server_info["hostname"] = f"SIMULADO-{server_info['hostname']}"[:100]
 
     response = requests.post(f"{os.getenv('WEB_DATA_VIZ_URL')}/servidores/cadastrar", json=server_info)
 
@@ -138,8 +147,10 @@ def cadastrar_metricas(componentes):
 console = Console()
 
 # Autentica o usuário e identifica empresa, equipamento e componentes.
-def realizar_login():
+def realizar_login(modo="real"):
     console.clear()
+    if modo == "simulado":
+        console.print("[yellow]MODO SIMULADO: métricas sintéticas em equipamento separado.[/yellow]")
 
     # Cabeçalho
     console.print()
@@ -184,7 +195,7 @@ def realizar_login():
 
     # Servidor
     with console.status("[cyan]Cadastrando servidor...[/cyan]", spinner="dots"):
-        servidor = cadastrar_servidor()
+        servidor = cadastrar_servidor(modo)
 
     if not servidor:
         return None
@@ -381,7 +392,10 @@ def capturar_metricas(tipos):
     return dados
 
 # Coordena os prazos de coleta, a atualização pela API e a gravação em lotes.
-def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atualizacao=60):
+def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atualizacao=60, simulador=None, modo="real"):
+    modo = obter_modo(modo)
+    if (modo == "simulado") != (simulador is not None):
+        raise ValueError("O modo de captura deve corresponder ao gerador selecionado.")
     campos = obter_campos_metricas()
     headers = [
         "servidor_id", "timestamp", "uso_cpu", "carga_1m",
@@ -399,13 +413,15 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
         configuracoes_por_tipo[tipo] = configuracao
 
     agora = time.monotonic()
+    inicio_simulacao = agora
+    cenario_anterior = None
     proximas_coletas = {tipo: agora for tipo in configuracoes_por_tipo}
     proxima_coleta_processos = agora
     proxima_atualizacao = agora + intervalo_atualizacao
 
     # Usa lotes de um minuto; mantém os CSVs antigos intactos.
-    diretorio_lotes = Path(__file__).resolve().parent / "csvs" / "lotes"
-    lotes = LotesCaptura(server_id, headers, diretorio_lotes, intervalo=60)
+    diretorio_lotes = obter_diretorio_lotes(modo)
+    lotes = LotesCaptura(server_id, headers, diretorio_lotes, intervalo=60, modo=modo)
     print(f"Monitoramento ativo. Lotes em: {diretorio_lotes}")
 
     try:
@@ -460,11 +476,18 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
             ]
             coletar_processos = agora >= proxima_coleta_processos
 
-            if coletar_processos:
+            if simulador is not None and (tipos_devidos or coletar_processos):
+                simulador.atualizar(agora - inicio_simulacao)
+                if simulador.cenario != cenario_anterior:
+                    print(f"[SIMULADO] Cenário: {simulador.cenario}")
+                    cenario_anterior = simulador.cenario
+
+            if coletar_processos and simulador is None:
                 processos = preparar_processos()
 
             if tipos_devidos:
-                dados = capturar_metricas(tipos_devidos)
+                dados = (capturar_metricas(tipos_devidos) if simulador is None else
+                         simulador.capturar_metricas(tipos_devidos, campos, server_id, timestamp))
                 dados["timestamp"] = timestamp
 
                 # Colunas não medidas nesta rodada ficam vazias, não recebem zero.
@@ -480,10 +503,11 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
                     "USO_CPU", "TAXA_LEITURA_DISCO", "TAXA_ESCRITA_DISCO",
                     "TAXA_ENVIO_REDE", "TAXA_RECEBIMENTO_REDE"
                 }
-                if not set(tipos_devidos) & tipos_com_medicao_temporizada:
+                if simulador is None and not set(tipos_devidos) & tipos_com_medicao_temporizada:
                     time.sleep(1)
 
-                registros = capturar_processos(processos, timestamp)
+                registros = (capturar_processos(processos, timestamp) if simulador is None else
+                             simulador.capturar_processos(server_id, timestamp))
                 lotes.gravar_processos(registros)
                 proxima_coleta_processos = agora + intervalo_processos
 
@@ -532,7 +556,17 @@ def buscar_configuracoes():
 
     return configuracoes
 
-if __name__ == "__main__":
-    if realizar_login():
+def main():
+    parser = argparse.ArgumentParser(description="Captura real ou simulada do StreamGuard.")
+    adicionar_argumentos(parser)
+    argumentos = parser.parse_args()
+    modo = obter_modo(argumentos.modo)
+    parametros = parametros_simulacao(argumentos, modo)
+    if realizar_login(modo):
         configuracoes = buscar_configuracoes()
-        iniciar_monitoramento(configuracoes)
+        simulador = SimuladorMetricas(**parametros) if modo == "simulado" else None
+        iniciar_monitoramento(configuracoes, simulador=simulador, modo=modo)
+
+
+if __name__ == "__main__":
+    main()
