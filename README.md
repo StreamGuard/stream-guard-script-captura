@@ -92,6 +92,6 @@ Para implantação conjunta, disponha captura, ETL e site lado a lado. `iniciar-
 
 A API utiliza `develop`; captura e ETL utilizam `main`. As variáveis `STREAMGUARD_CAPTURA_BRANCH` e `STREAMGUARD_ETL_BRANCH` permitem selecionar outras branches. A ETL utiliza seu próprio `.env` e ambiente Python.
 
-Lotes simulados têm identificação `simulado_` e seus marcadores Bronze contêm `modo: simulado`. Os nomes de processos também são identificados como `SIMULADO`. O remetente impede enviar um lote cuja identificação não corresponda ao modo selecionado. A separação por equipamento evita misturar identidades reais e sintéticas na Silver; os caminhos S3 e as colunas CSV permanecem iguais.
+Lotes simulados têm identificação `simulado_`. Os marcadores Bronze contêm `lote`, `concluido_em_utc` e `objetos` em ambos os modos. Os nomes de processos também são identificados como `SIMULADO`. O remetente impede enviar um lote cuja identificação não corresponda ao modo selecionado. A separação por equipamento evita misturar identidades reais e sintéticas na Silver; os caminhos S3 e as colunas CSV permanecem iguais.
 
 A disponibilidade das leituras reais depende do sistema operacional e das permissões de acesso. O primeiro cadastro do equipamento simulado e o envio pela infraestrutura real precisam ser homologados com a API e a AWS disponíveis.

@@ -45,8 +45,6 @@ def enviar_lote(s3, bucket, lote, enviados, modo="real"):
         "concluido_em_utc": datetime.now(timezone.utc).isoformat(),
         "objetos": objetos,
     }
-    if modo == "simulado":
-        marcador["modo"] = "simulado"
     s3.put_object(
         Bucket=bucket,
         Key=f"bronze/lotes-concluidos/{lote.name}.json",
