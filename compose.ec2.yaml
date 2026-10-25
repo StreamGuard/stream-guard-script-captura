@@ -25,6 +25,7 @@ services:
   api:
     build:
       context: ./stream-guard-site-institucional
+      dockerfile: ../stream-guard-script-captura/Dockerfile.api
     restart: unless-stopped
     env_file:
       - api.env
@@ -33,6 +34,29 @@ services:
     depends_on:
       banco:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const q=require('http').get('http://127.0.0.1:3333/metricas/configuracoes/1',r=>{r.resume();r.on('end',()=>process.exit(r.statusCode===200?0:1))});q.setTimeout(5000,()=>{q.destroy();process.exit(1)});q.on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 6s
+      retries: 12
+      start_period: 30s
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  java:
+    build:
+      context: ./StreamGuardLogs
+      dockerfile: ../stream-guard-script-captura/Dockerfile.java
+    restart: unless-stopped
+    env_file:
+      - java.env
+    volumes:
+      - estado_java:/estado
+    depends_on:
+      api:
+        condition: service_healthy
     logging:
       options:
         max-size: "5m"
@@ -40,3 +64,4 @@ services:
 
 volumes:
   dados_mysql:
+  estado_java:
