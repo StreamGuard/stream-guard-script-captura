@@ -123,7 +123,7 @@ class Provisionamento:
 
     def parametros_instancia(self, grupo):
         p = self.estado["parametros"]
-        return {"ImageId": p["ami"], "InstanceType": "t3.medium", "MinCount": 1, "MaxCount": 1,
+        return {"ImageId": p["ami"], "InstanceType": "t3.small", "MinCount": 1, "MaxCount": 1,
                 "KeyName": p["nome_chave"], "IamInstanceProfile": {"Name": p["perfil_instancia"]},
                 "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": p["subnet"], "Groups": [grupo], "AssociatePublicIpAddress": True}],
                 "BlockDeviceMappings": [{"DeviceName": p["dispositivo"], "Ebs": {"VolumeSize": 30, "VolumeType": "gp3", "Encrypted": True, "DeleteOnTermination": True}}],
@@ -282,6 +282,8 @@ def implantar(pasta, estado, chave, bootstrap):
 def main():
     parser = argparse.ArgumentParser(description="Planeja uma implantação nova; --executar pede confirmação e cria recursos AWS.")
     parser.add_argument("--executar", action="store_true")
+    parser.add_argument("--somente-infra", action="store_true",
+                        help="Cria somente bucket, rede e EC2; não instala a ETL antiga nem os serviços. Use no fluxo Lambda v2.")
     parser.add_argument("--diretorio", type=Path, default=Path.home() / ".streamguard/implantacao")
     parser.add_argument("--perfil", default="streamguard")
     parser.add_argument("--rede")
@@ -328,7 +330,7 @@ def main():
         provisionamento.salvar()
         provisionamento.verificar_permissao_ec2()
         print(f"Conta confirmada (final {parametros['conta'][-4:]}), perfil {args.perfil}, região us-east-1.")
-        print(f"Plano {estado['id']}: bucket novo {estado.get('bucket') or nome_bucket(estado['id'], agora=datetime.fromisoformat(estado['data']))}; EC2 Ubuntu 24.04 t3.medium, EBS gp3 30 GiB; grupo exclusivo TCP 22/3333 de {rede}.")
+        print(f"Plano {estado['id']}: bucket novo {estado.get('bucket') or nome_bucket(estado['id'], agora=datetime.fromisoformat(estado['data']))}; EC2 Ubuntu 24.04 t3.small, EBS gp3 30 GiB; grupo exclusivo TCP 22/3333 de {rede}.")
         print("Role existente: " + parametros["perfil_instancia"] + ". MySQL sem porta pública; HTTP acadêmico sem criptografia; Jira desativado.")
         print("Dry-run EC2 aprovado. Criação S3, autorização efetiva da Role no bucket e instalação só serão comprovadas na execução real.")
         if not args.executar:
@@ -338,7 +340,7 @@ def main():
             print("Execução cancelada sem provisionamento.")
             return
         bootstrap = {}
-        if not estado.get("implantado"):
+        if not estado.get("implantado") and not args.somente_infra:
             bootstrap = {"empresa": input("Razão social da empresa inicial: ").strip(), "cnpj": input("CNPJ (14 dígitos): ").strip(),
                          "nome": input("Nome do Admin inicial: ").strip(), "email": input("E-mail do Admin inicial: ").strip(),
                          "senha": getpass.getpass("Senha pessoal do Admin (não será gravada no plano): ")}
@@ -346,6 +348,12 @@ def main():
         provisionamento.bucket()
         grupo = provisionamento.grupo()
         provisionamento.instancia(grupo)
+        if args.somente_infra:
+            estado["infraestrutura_pronta"] = True
+            provisionamento.salvar()
+            print(f"Infraestrutura pronta: EC2 {estado['instancia']}, IP {estado['ip']}, bucket {estado['bucket']}.")
+            print("Nenhum serviço ou ETL foi instalado. Continue pelas etapas de aplicação e Lambda do Guia_de_Instalacao.pdf.")
+            return
         implantar(pasta, estado, args.chave_ssh.resolve(), bootstrap)
         print(f"Implantação {estado['id']}: EC2 {estado['instancia']}, bucket {estado['bucket']}, API http://{estado['ip']}:3333.")
     finally:

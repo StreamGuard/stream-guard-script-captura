@@ -7,11 +7,12 @@ from uuid import uuid4
 
 
 class LotesCaptura:
-    def __init__(self, servidor_id, campos_metricas, diretorio, intervalo=60, modo="real"):
+    def __init__(self, servidor_id, campos_metricas, diretorio, intervalo=60, modo="real", empresa_id=0):
         if intervalo <= 0:
             raise ValueError("O intervalo dos lotes deve ser positivo.")
         self.modo = obter_modo(modo)
         self.servidor_id = servidor_id
+        self.empresa_id = empresa_id
         self.campos_metricas = campos_metricas
         self.intervalo = intervalo
         self.raiz = Path(diretorio)
@@ -28,7 +29,8 @@ class LotesCaptura:
         # Horário UTC e UUID evitam misturar lotes de máquinas ou execuções distintas.
         horario = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         prefixo = "simulado_" if self.modo == "simulado" else ""
-        nome = f"{prefixo}servidor_{self.servidor_id}_{horario}_{uuid4().hex}"
+        # O nome começa pelo horário e carrega a empresa: o ETL a lê daqui para saber a pasta da Bronze.
+        nome = f"{prefixo}{horario}_empresa_{self.empresa_id}_servidor_{self.servidor_id}_{uuid4().hex}"
         self.pasta = self.abertos / nome
         self.pasta.mkdir()
         self.inicio = time.monotonic()

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,14 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 from configuracao_captura import adicionar_argumentos, obter_modo, obter_diretorio_lotes
+
+
+def empresa_do_lote(lote):
+    # O nome do lote tem o formato [simulado_]<horario>_empresa_<id>_servidor_<id>_<uuid>.
+    achado = re.search(r"_empresa_(\d+)_servidor_", lote.name)
+    if not achado:
+        raise ValueError(f"Lote sem empresa no nome (formato antigo): {lote.name}")
+    return achado.group(1)
 
 
 def enviar_lote(s3, bucket, lote, enviados, modo="real"):
@@ -31,23 +40,27 @@ def enviar_lote(s3, bucket, lote, enviados, modo="real"):
     if destino.exists():
         raise ValueError(f"Já existe uma pasta enviada com o nome {lote.name}.")
 
+    empresa = empresa_do_lote(lote)
     objetos = []
     for arquivo in arquivos:
         # O mesmo lote mantém a mesma chave em todas as tentativas de envio.
-        chave = f"bronze/{arquivo.stem}/{lote.name}.csv"
+        chave = f"bronze/{empresa}/{arquivo.stem}/{lote.name}.csv"
         s3.upload_file(str(arquivo), bucket, chave)
         objetos.append({"chave": chave, "bytes": arquivo.stat().st_size})
         print(f"Enviado: s3://{bucket}/{chave}")
 
     # O marcador informa que todos os objetos deste lote foram enviados.
+    # A pasta com a data (UTC) deixa o ETL listar só os últimos dias, e não todos os lotes.
+    agora = datetime.now(timezone.utc)
     marcador = {
         "lote": lote.name,
-        "concluido_em_utc": datetime.now(timezone.utc).isoformat(),
+        "empresa_id": int(empresa),
+        "concluido_em_utc": agora.isoformat(),
         "objetos": objetos,
     }
     s3.put_object(
         Bucket=bucket,
-        Key=f"bronze/lotes-concluidos/{lote.name}.json",
+        Key=f"bronze/{empresa}/lotes-concluidos/{agora.strftime('%Y-%m-%d')}/{lote.name}.json",
         Body=json.dumps(marcador, ensure_ascii=False).encode("utf-8"),
         ContentType="application/json",
     )

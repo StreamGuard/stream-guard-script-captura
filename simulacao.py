@@ -92,6 +92,15 @@ class SimuladorMetricas:
         return {"servidor_id": servidor_id, "timestamp": timestamp,
                 **{campos[tipo]: self.estado[campos[tipo]] for tipo in tipos}}
 
+    def inventario(self, segundos):
+        # Mesmo perfil virtual de sempre; o uptime acompanha o tempo da simulação.
+        return {
+            "memoria_total": self.RAM_TOTAL,
+            "disco_total": self.DISCO_TOTAL,
+            "uptime": int(segundos) + 86400,
+            "capacidade_rede": int(self.REDE_BYTES_SEGUNDO),
+        }
+
     def capturar_processos(self, servidor_id, timestamp):
         pesos = (0.55, 0.25, 0.12, 0.08)
         nomes = ("encoder", "distribuidor", "cache", "sistema")

@@ -64,6 +64,7 @@ def montar_metricas():
 def cadastrar_servidor(modo="real"):
     identidade = carregar_identidade(socket.gethostname())
     server_info = {
+        "empresa_id": empresa_id,
         "codigo_agente": identidade["codigo_agente"],
         "hostname": socket.gethostname(),
         "sistema_operacional": platform.system(),
@@ -216,6 +217,24 @@ def calcular_taxa(contador_inicial, contador_final, campo, segundos):
         return None
 
     return diferenca / segundos
+
+
+# Lê dados fixos da máquina (inventário). Vão em toda linha de métricas, sem depender do banco.
+def capturar_inventario():
+    inventario = {
+        "memoria_total": psutil.virtual_memory().total,
+        "disco_total": psutil.disk_usage(os.path.abspath(os.sep)).total,
+        "uptime": int(time.time() - psutil.boot_time()),
+        "capacidade_rede": None,
+    }
+    # Capacidade da placa: maior velocidade (Mbit/s) entre as interfaces ativas; vazio se não houver.
+    velocidades = [
+        placa.speed for nome, placa in psutil.net_if_stats().items()
+        if placa.isup and placa.speed > 0 and not nome.lower().startswith(("lo", "loopback"))
+    ]
+    if velocidades:
+        inventario["capacidade_rede"] = max(velocidades) * 1_000_000 / 8
+    return inventario
 
 
 # Faz a primeira leitura necessária para medir CPU dos processos.
@@ -374,7 +393,8 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
         "servidor_id", "timestamp", "uso_cpu", "carga_1m",
         "carga_5m", "carga_15m", "uso_ram", "ram_disponivel",
         "uso_disco", "taxa_leitura_disco", "taxa_escrita_disco",
-        "taxa_envio_rede", "taxa_recebimento_rede"
+        "taxa_envio_rede", "taxa_recebimento_rede",
+        "memoria_total", "disco_total", "uptime", "capacidade_rede"
     ]
 
     # Permite localizar os parâmetros de cada métrica pelo seu tipo.
@@ -394,7 +414,7 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
 
     # Usa lotes de um minuto; mantém os CSVs antigos intactos.
     diretorio_lotes = obter_diretorio_lotes(modo)
-    lotes = LotesCaptura(server_id, headers, diretorio_lotes, intervalo=60, modo=modo)
+    lotes = LotesCaptura(server_id, headers, diretorio_lotes, intervalo=60, modo=modo, empresa_id=empresa_id)
     print(f"Monitoramento ativo. Lotes em: {diretorio_lotes}")
 
     try:
@@ -462,6 +482,7 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
                 dados = (capturar_metricas(tipos_devidos) if simulador is None else
                          simulador.capturar_metricas(tipos_devidos, campos, server_id, timestamp))
                 dados["timestamp"] = timestamp
+                dados.update(capturar_inventario() if simulador is None else simulador.inventario(agora - inicio_simulacao))
 
                 # Colunas não medidas nesta rodada ficam vazias, não recebem zero.
                 lotes.gravar_metricas(dados)
