@@ -22,15 +22,8 @@ def configurar(raiz, conexao, modo):
         if any(atual.get(k) != v for k, v in valores.items()):
             raise ValueError(".env existente preservado: há divergência de implantação/modo. Revise o arquivo privado ou use um checkout separado; a identidade não foi alterada.")
         return False
-    modelo = (raiz / ".env.example").read_text(encoding="utf-8-sig")
-    linhas = []
-    for linha in modelo.splitlines():
-        chave = linha.split("=", 1)[0].strip()
-        if chave in valores and not linha.lstrip().startswith("#"):
-            linhas.append(chave + "=" + valores.pop(chave))
-        else:
-            linhas.append(linha)
-    linhas.extend(k + "=" + v for k, v in valores.items())
+    # Somente os valores desta instalação; não depende de um modelo de .env.
+    linhas = [chave + "=" + valor for chave, valor in valores.items()]
     with destino.open("x", encoding="utf-8", newline="\n") as arquivo:
         destino.chmod(0o600)
         arquivo.write("\n".join(linhas) + "\n")

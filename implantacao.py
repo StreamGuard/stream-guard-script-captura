@@ -10,13 +10,9 @@ import time
 from urllib.parse import urlsplit
 
 
-REPOSITORIOS = {"stream-guard-script-captura": "main", "stream-guard-site-institucional": "develop",
-                "stream-guard-etl": "main", "StreamGuardLogs": "main"}
-
-
 def executar(comando, entrada=None, timeout=1200):
     try:
-        resultado = subprocess.run(comando, input=entrada, text=True, capture_output=True, timeout=timeout,
+        resultado = subprocess.run(comando, input=entrada, text=True, encoding="utf-8", capture_output=True, timeout=timeout,
                                    stdin=subprocess.DEVNULL if entrada is None else None)
     except (OSError, subprocess.TimeoutExpired):
         raise RuntimeError(f"Falha ao executar {Path(comando[0]).name}; comando ausente ou tempo esgotado.") from None
@@ -66,7 +62,7 @@ def preservar_env(caminho, valores, obrigatorios=None, modelo=None):
             raise ValueError("Configuração de ambiente inválida.")
     restantes = {k: str(v) for k, v in valores.items()}
     linhas = []
-    if modelo:
+    if modelo and Path(modelo).is_file():
         for linha in Path(modelo).read_text(encoding="utf-8-sig").splitlines():
             chave = linha.split("=", 1)[0].strip()
             if not linha.lstrip().startswith("#") and chave in restantes:
@@ -111,16 +107,13 @@ def preparar_configuracoes(infra, config):
         gravar_json(marcador, identidade)
     banco = preservar_env(infra / "banco.env", {"MYSQL_DATABASE": "streamguard", "MYSQL_ROOT_PASSWORD": secrets.token_hex(24)}, {"MYSQL_DATABASE": "streamguard"})
     api_esperado = {"AMBIENTE_PROCESSO": "producao", "APP_HOST": "0.0.0.0", "APP_PORT": "3333", "APP_ORIGIN": config["origem"],
-                    "DB_HOST": "banco", "DB_PORT": "3306", "DB_DATABASE": "streamguard", "DB_USER": "streamguard_api", "SESSION_COOKIE_SECURE": "false"}
-    api = preservar_env(infra / "api.env", {**api_esperado, "DB_PASSWORD": secrets.token_hex(24), "SESSION_SECRET": secrets.token_hex(48), "SESSION_TTL_MINUTES": "30"}, api_esperado,
-                        modelo=infra / "stream-guard-site-institucional/.env.example")
-    if not re.fullmatch(r"[a-fA-F0-9]{48}", banco.get("MYSQL_ROOT_PASSWORD", "")) or not re.fullmatch(r"[a-fA-F0-9]{48}", api.get("DB_PASSWORD", "")) or len(api.get("SESSION_SECRET", "")) < 32:
+                    "DB_HOST": "banco", "DB_PORT": "3306", "DB_DATABASE": "streamguard", "DB_USER": "streamguard_api",
+                    "S3_BUCKET": config["bucket"], "AWS_REGION": config["regiao"]}
+    api = preservar_env(infra / "api.env", {**api_esperado, "DB_PASSWORD": secrets.token_hex(24)}, api_esperado)
+    if not re.fullmatch(r"[a-fA-F0-9]{48}", banco.get("MYSQL_ROOT_PASSWORD", "")) or not re.fullmatch(r"[a-fA-F0-9]{48}", api.get("DB_PASSWORD", "")):
         raise ValueError("Segredos privados centrais ausentes ou incompatíveis com o instalador; arquivos preservados.")
     preservar_env(infra / "java.env", {"S3_BUCKET": config["bucket"], "AWS_DEFAULT_REGION": config["regiao"], "WEB_DATA_VIZ_URL": "http://api:3333",
-                  "CAPTURA_FUSO": "America/Sao_Paulo", "ESTADO_DIRETORIO": "/estado", "JIRA_ENVIAR": "false"}, modelo=infra / "StreamGuardLogs/.env.example")
-    preservar_env(infra / "stream-guard-etl/.env", {"S3_BUCKET": config["bucket"], "AWS_DEFAULT_REGION": config["regiao"], "GOLD_JANELA_MINUTOS": "5"}, modelo=infra / "stream-guard-etl/.env.example")
-    if "AWS_PROFILE" in ler_env(infra / "stream-guard-etl/.env"):
-        raise ValueError("ETL na EC2 não deve conter AWS_PROFILE; arquivo preservado para revisão.")
+                  "CAPTURA_FUSO": "America/Sao_Paulo", "ESTADO_DIRETORIO": "/estado", "JIRA_ENVIAR": "false"})
     return api
 
 
@@ -143,27 +136,24 @@ def sql_inicial(fonte, config):
         f"INSERT INTO usuario(nome,cargo,email,senha_hash,fk_empresa,fk_permissao) VALUES ({literal(config['nome'])},'Admin',{literal(config['email'])},'{senha_hash}',LAST_INSERT_ID(),2);\nCOMMIT;\n"
 
 
-def atualizar_repositorios(infra):
-    for nome, branch in REPOSITORIOS.items():
-        pasta = infra / nome
-        url = "https://github.com/StreamGuard/" + nome + ".git"
-        if not pasta.exists():
-            executar(["git", "clone", "--branch", branch, "--single-branch", url, str(pasta)])
-        else:
-            if not (pasta / ".git").is_dir() or executar(["git", "-C", str(pasta), "remote", "get-url", "origin"]).strip() != url:
-                raise ValueError("Checkout existente inesperado: " + nome)
-            if executar(["git", "-C", str(pasta), "branch", "--show-current"]).strip() != branch or executar(["git", "-C", str(pasta), "status", "--porcelain"]).strip():
-                raise ValueError("Branch inesperada ou alterações locais em " + nome + "; nada foi descartado.")
-            executar(["git", "-C", str(pasta), "fetch", "origin"])
-            executar(["git", "-C", str(pasta), "merge", "--ff-only", "origin/" + branch])
-            if executar(["git", "-C", str(pasta), "rev-parse", "HEAD"]).strip() != executar(["git", "-C", str(pasta), "rev-parse", "origin/" + branch]).strip():
-                raise ValueError("Há commits locais desconhecidos em " + nome + "; nada foi descartado.")
+def verificar_fontes(infra):
+    obrigatorios = {
+        "stream-guard-script-captura": ("instalar.sh", "iniciar-ec2.sh", "provisionar.py", "implantacao.py", "compose.ec2.yaml", "Dockerfile.api",
+                                      "preparar-captura.py", "executar.py", "api_captura.py", "script-captura.py",
+                                      "lotes.py", "enviar-bronze.py", "configuracao_captura.py", "simulacao.py", "requirements.txt"),
+        "stream-guard-site-institucional": ("app.js", "package.json", "src/database/StreamGuard-ScripBD.sql"),
+        "stream-guard-etl": ("lambda_function.py", "tratamento.py"),
+    }
+    for repositorio, arquivos in obrigatorios.items():
+        for nome in arquivos:
+            if not (infra / repositorio / nome).is_file():
+                raise ValueError("Fonte necessária ausente: " + repositorio + "/" + nome)
 
 
 def instalar(infra, config):
     origem = infra / "stream-guard-script-captura"
     api = preparar_configuracoes(infra, config)
-    executar(["bash", str(infra / "stream-guard-etl/instalar.sh"), "--validar-config"])
+    verificar_fontes(infra)
     destino_compose = infra / "compose.yaml"
     esperado = (origem / "compose.ec2.yaml").read_bytes()
     if destino_compose.exists() and destino_compose.read_bytes() != esperado:
@@ -185,24 +175,18 @@ def instalar(infra, config):
         gravar_json(marcador, {"id": config["id"]})
     elif json.loads(marcador.read_text())["id"] != config["id"]:
         raise ValueError("Banco pertence a outra implantação.")
-    elif tabelas != 8:
+    elif tabelas != 7:
         raise ValueError("Estrutura MySQL inesperada; não aplicar inicialização ou migração automaticamente.")
     senha = api["DB_PASSWORD"]
     mysql(f"CREATE USER IF NOT EXISTS 'streamguard_api'@'%' IDENTIFIED BY '{senha}';\nALTER USER 'streamguard_api'@'%' IDENTIFIED BY '{senha}';\nGRANT SELECT, INSERT, UPDATE, DELETE ON streamguard.* TO 'streamguard_api'@'%';")
     executar([*compose, "up", "-d", "--build", "api"])
     verificar_api(compose)
-    executar(["bash", str(infra / "stream-guard-etl/instalar.sh")])
-    python = str(infra / "stream-guard-etl/.venv/bin/python")
-    executar([python, "-c", "import boto3; s=boto3.client('s3',region_name='us-east-1'); s.list_objects_v2(Bucket=" + repr(config["bucket"]) + ",Prefix='bronze/',MaxKeys=1)"], timeout=90)
-    executar([*compose, "up", "-d", "--build", "java"])
     time.sleep(5)
     processos = executar([*compose, "ps", "--format", "json"])
     registros = json.loads(processos) if processos.lstrip().startswith("[") else [json.loads(l) for l in processos.splitlines() if l.strip()]
-    if {p.get("Service") for p in registros if p.get("State") == "running"} != {"banco", "api", "java"}:
+    if not {"banco", "api"}.issubset({p.get("Service") for p in registros if p.get("State") == "running"}):
         raise RuntimeError("Um serviço central não permaneceu em execução. Consulte o estado com docker compose ps; não remova os volumes.")
-    hashes = {nome: executar(["git", "-C", str(infra / nome), "rev-parse", "HEAD"]).strip() for nome in REPOSITORIOS}
-    gravar_json(infra / "versoes-implantadas.json", hashes)
-    print("MySQL inicializado, sessão HTTP configurada, API consultando banco, ETL agendada, leitura S3 autorizada e Java iniciado sem Jira.")
+    print("API e MySQL iniciados no Docker; consulta ao banco aprovada. A ETL será configurada na Lambda pelo provisionador local.")
 
 
 def verificar_api(compose):
@@ -226,7 +210,7 @@ def main():
     if any(c in str(infra) for c in (" ", "%", "\\")):
         raise ValueError("A instalação central requer caminho Linux sem espaços, % ou barras invertidas.")
     if sys.argv[1] == "bootstrap":
-        atualizar_repositorios(infra)
+        verificar_fontes(infra)
         executar(["bash", str(infra / "stream-guard-script-captura/instalar.sh")], entrada=json.dumps(config), timeout=3600)
     else:
         instalar(infra, config)

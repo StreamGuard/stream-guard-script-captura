@@ -12,7 +12,7 @@ if [[ "$ID" != ubuntu || "$VERSION_ID" != 24.04 ]]; then
     echo 'Este instalador utiliza Ubuntu 24.04 LTS; não altera outras distribuições automaticamente.' >&2
     exit 1
 fi
-for arquivo in compose.ec2.yaml Dockerfile.api Dockerfile.java implantacao.py; do
+for arquivo in compose.ec2.yaml Dockerfile.api implantacao.py; do
     [[ -f "$RAIZ/$arquivo" ]] || { echo "Arquivo necessário ausente: $arquivo" >&2; exit 1; }
 done
 sudo -n true

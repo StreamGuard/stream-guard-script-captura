@@ -46,6 +46,7 @@ services:
         max-file: "2"
 
   java:
+    profiles: ["logs"]
     build:
       context: ./StreamGuardLogs
       dockerfile: ../stream-guard-script-captura/Dockerfile.java
