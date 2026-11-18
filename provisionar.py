@@ -132,7 +132,7 @@ class Provisionamento:
 
     def parametros_instancia(self, grupo):
         p = self.estado["parametros"]
-        return {"ImageId": p["ami"], "InstanceType": "t3.small", "MinCount": 1, "MaxCount": 1,
+        return {"ImageId": p["ami"], "InstanceType": self.estado.get("tipo_instancia", "t3.small"), "MinCount": 1, "MaxCount": 1,
                 "KeyName": p["nome_chave"], "IamInstanceProfile": {"Name": p["perfil_instancia"]},
                 "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": p["subnet"], "Groups": [grupo], "AssociatePublicIpAddress": True}],
                 "BlockDeviceMappings": [{"DeviceName": p["dispositivo"], "Ebs": {"VolumeSize": 30, "VolumeType": "gp3", "Encrypted": True, "DeleteOnTermination": True}}],
@@ -419,6 +419,7 @@ def main():
                         help="Cria somente bucket, rede e EC2; não instala a ETL antiga nem os serviços. Use no fluxo Lambda v2.")
     parser.add_argument("--diretorio", type=Path, default=Path.home() / ".streamguard/implantacao")
     parser.add_argument("--perfil", default="streamguard")
+    parser.add_argument("--tipo-instancia", choices=("t3.small", "t3.medium"), default="t3.small")
     parser.add_argument("--rede")
     parser.add_argument("--chave-ssh", type=Path)
     parser.add_argument("--nome-chave")
@@ -439,6 +440,8 @@ def main():
             raise ValueError(f"Instale {comando} antes de executar.")
     if not args.chave_ssh.is_file():
         raise ValueError("Informe o arquivo privado da chave EC2 existente; ele não será enviado à instância.")
+    if os.name != "nt":
+        args.chave_ssh.chmod(0o600)
     pasta = args.diretorio.expanduser().resolve()
     if any((p / ".git").exists() for p in (pasta, *pasta.parents)):
         raise ValueError("Use uma pasta de implantação fora dos repositórios Git.")
@@ -457,14 +460,20 @@ def main():
         if not isinstance(estado, dict) or not re.fullmatch(r"[a-f0-9]{32}", estado.get("id", "")) or not isinstance(estado.get("data"), str):
             raise ValueError("Estado local inválido; preserve a pasta para revisão antes de provisionar.")
         datetime.fromisoformat(estado["data"])
+        if estado.get("tipo_instancia", args.tipo_instancia) != args.tipo_instancia:
+            raise ValueError("O tipo de instância diverge do plano existente; preserve o plano.")
+        estado["tipo_instancia"] = args.tipo_instancia
         aws = AWS(args.perfil)
         rede, fonte = (rede_autorizada(args.rede), "informado por --rede") if args.rede else detectar_rede()
         print(f"Rede de entrada planejada: {rede} (TCP 3333 e SSH 22). Fonte: {fonte}.")
         parametros = descobrir(aws, args.chave_ssh, rede, args.perfil_instancia, args.subnet, args.nome_chave)
         if "parametros" in estado:
-            for nome in ("conta", "rede", "subnet", "vpc", "perfil_instancia", "nome_chave"):
-                if estado["parametros"][nome] != parametros[nome]:
-                    raise ValueError("O plano existente diverge da conta/rede/chave informada. Não foi alterado; use uma pasta nova para outra implantação.")
+            divergencias = [nome for nome in ("conta", "rede", "subnet", "vpc", "perfil_instancia", "nome_chave")
+                            if estado["parametros"][nome] != parametros[nome]]
+            if divergencias:
+                raise ValueError("O plano em " + str(caminho) + " diverge nos campos: " + ", ".join(divergencias) +
+                                 ". Para retomar, confira os dados da mesma implantação. Para uma nova instalação, "
+                                 "use --diretorio com uma pasta nova. O plano foi preservado.")
         else:
             estado["parametros"] = parametros
         estado["parametros"]["role_lambda"] = parametros["role_lambda"]
@@ -476,7 +485,7 @@ def main():
             aws.chamar("lambda", "get-layer-version", {"LayerName": "arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312", "VersionNumber": 32})
             print("ETL planejada: Lambda Python 3.12, 1024 MiB, timeout 180 s, camada Pandas e execução a cada 5 minutos.")
         print(f"Conta confirmada (final {parametros['conta'][-4:]}), perfil {args.perfil}, região us-east-1.")
-        print(f"Plano {estado['id']}: bucket novo {estado.get('bucket') or nome_bucket(estado['id'], agora=datetime.fromisoformat(estado['data']))}; EC2 Ubuntu 24.04 t3.small, EBS gp3 30 GiB; grupo exclusivo TCP 22/3333 de {rede}.")
+        print(f"Plano {estado['id']}: bucket novo {estado.get('bucket') or nome_bucket(estado['id'], agora=datetime.fromisoformat(estado['data']))}; EC2 Ubuntu 24.04 {estado['tipo_instancia']}, EBS gp3 30 GiB; grupo exclusivo TCP 22/3333 de {rede}.")
         print("Role existente: " + parametros["perfil_instancia"] + ". MySQL sem porta pública; HTTP acadêmico sem criptografia; Jira desativado.")
         print("Dry-run EC2 aprovado. Criação S3, autorização efetiva da Role no bucket e instalação só serão comprovadas na execução real.")
         if not args.executar:
