@@ -54,7 +54,22 @@ class ApiCaptura:
             if resposta.status_code in (401, 403):
                 self.empresa_id = None
                 raise ValueError("Operação não autorizada; confira o login e a empresa antes de tentar novamente.")
-            raise ValueError(f"Operação não confirmada pela API (HTTP {resposta.status_code}).")
+            # Exibe a rota sem parâmetros; páginas HTML de erro não ajudam no terminal.
+            if resposta.status_code == 404:
+                raise ValueError(f"Rota ou recurso não encontrado: {metodo} {rota.split('?')[0]} (HTTP 404). Confira a versão da API.")
+            try:
+                detalhe = resposta.json()
+            except (ValueError, TypeError):
+                # Aceita detalhes JSON da API e descarta páginas de erro do servidor.
+                detalhe = ""
+            if isinstance(detalhe, dict):
+                detalhe = detalhe.get("mensagem") or detalhe.get("erro") or ""
+            if isinstance(detalhe, str):
+                detalhe = detalhe.strip().strip('"')[:240]
+            else:
+                detalhe = ""
+            sufixo = f": {detalhe}" if detalhe else ""
+            raise ValueError(f"Operação não confirmada pela API (HTTP {resposta.status_code}){sufixo}.")
         return self._dados(resposta)
 
     def fechar(self):

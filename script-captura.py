@@ -88,6 +88,7 @@ def cadastrar_componentes():
 
     for componente in componentes:
         body = {
+            "empresa_id": empresa_id,
             "servidor_id": server_id,
             "tipo": componente["tipo"],
             "nome": componente["nome"]
@@ -116,6 +117,8 @@ def cadastrar_metricas(componentes):
         metricas_componente = metricas_modelo.get(tipo_componente, [])
         for metrica in metricas_componente:
             payload = {
+                "empresa_id": empresa_id,
+                "servidor_id": server_id,
                 "componente_id": componente_id,
                 "tipo": metrica["tipo"],
                 "nome": metrica["nome"],
@@ -191,19 +194,6 @@ def realizar_login(modo="real"):
         metricas = cadastrar_metricas(componentes)
 
     console.print(f"[green]✓[/green] {len(metricas)} métricas configuradas.")
-
-    # Finalização
-    console.print()
-    with console.status("[cyan]Iniciando monitoramento...[/cyan]", spinner="dots"):
-        time.sleep(1.5)
-
-    console.print("[green]✓[/green] Monitoramento iniciado.")
-
-    console.print()
-    console.print(Align.center(Text("Seu sistema já está sendo monitorado!", style="bold green")))
-    console.print()
-    console.print(Align.center(Text("O Stream Guard está pronto para proteger seu ambiente.", style="dim")))
-    console.print()
 
     return empresa_id
 
@@ -516,7 +506,7 @@ def iniciar_monitoramento(configuracoes, intervalo_processos=40, intervalo_atual
 
 # Lê e valida os parâmetros da tabela config_metrica por meio da API.
 def buscar_configuracoes():
-    configuracoes = api.pedir("GET", f"/metricas/configuracoes/{server_id}")
+    configuracoes = api.pedir("GET", f"/metricas/configuracoes/{server_id}?empresa_id={empresa_id}")
 
     if not isinstance(configuracoes, list) or not configuracoes:
         raise ValueError("A API não retornou configurações de métricas.")
@@ -554,6 +544,7 @@ def main():
         parametros = parametros_simulacao(argumentos, modo)
         if realizar_login(modo):
             configuracoes = buscar_configuracoes()
+            console.print("[green]✓[/green] Configurações validadas. Iniciando monitoramento.")
             simulador = SimuladorMetricas(**parametros) if modo == "simulado" else None
             iniciar_monitoramento(configuracoes, simulador=simulador, modo=modo)
     except ValueError as erro:
